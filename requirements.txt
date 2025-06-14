@@ -1,0 +1,33 @@
+# Core dependencies
+livekit==1.0.6
+python-dotenv==1.1.0
+fastapi==0.104.1
+uvicorn==0.23.2
+openai==1.75.0
+
+# Backend (Flask) dependencies
+flask==3.0.3
+
+# Audio processing dependencies
+sounddevice==0.5.1
+psutil==7.0.0
+
+
+livekit-agents[deepgram,openai,silero,turn-detector]~=1.0
+livekit-plugins-noise-cancellation~=0.2
+python-dotenv>=1.0.0
+
+# LiveKit plugins
+livekit-protocol==1.0.2
+
+# Utilities
+anyio>=3.7.1,<4.0.0
+pydantic==2.11.3
+tqdm==4.67.1
+requests==2.32.3
+websockets==15.0.1
+httpx==0.28.1
+
+# Note: The following packages need to be installed from GitHub
+# pip install git+https://github.com/livekit/agents.git
+# pip install git+https://github.com/livekit/plugins.git
