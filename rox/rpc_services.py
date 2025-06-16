@@ -4,8 +4,9 @@ import base64
 import uuid
 import time
 import asyncio
-from livekit.rtc.rpc import RpcInvocationData # For RPC invocation data
-from livekit.agents import JobContext # Added for RPC context
+
+from livekit.agents import JobContext # Added for RPC context, simplified import
+from livekit.rtc.rpc import RpcInvocationData # Added import
 import json
 from generated.protos import interaction_pb2
 
@@ -17,62 +18,105 @@ class AgentInteractionService: # Simple class without inheritance
         self.agent_instance = agent_instance
         logger.info("!!!!!! DEBUG: AgentInteractionService initialized. !!!!!")
 
-    async def HandleFrontendButton(self, invocation_data: RpcInvocationData) -> str:
-        print("!!!!!! DEBUG: HandleFrontendButton ENTERED (once) !!!!!!")
-        logger.info("!!!!!! DEBUG: HandleFrontendButton ENTERED VIA LOGGER (once) !!!!!!")
-
-        # Deserialize the request from invocation_data.payload
-        request = interaction_pb2.FrontendButtonClickRequest()
-        # The payload is a base64-encoded string from the LiveKit client
-        # We need to decode it first before parsing
+    async def HandleFrontendButton(self, raw_payload: RpcInvocationData) -> str:
+        logger.info("[RPC DEBUG] HandleFrontendButton method invoked by frontend (via RpcInvocationData).")
         try:
-            if isinstance(invocation_data.payload, str):
-                logger.info(f"RPC HandleFrontendButton: Payload is a string, assuming base64 encoded. Length: {len(invocation_data.payload)}")
-                try:
-                    decoded_bytes = base64.b64decode(invocation_data.payload)
-                    logger.info(f"Base64 decoded payload. Length: {len(decoded_bytes)}")
-                    payload_bytes = decoded_bytes
-                except Exception as e:
-                    logger.error(f"Failed to decode base64 payload: {e}")
-                    payload_bytes = invocation_data.payload.encode('utf-8')
-                    logger.info(f"Using raw UTF-8 encoded payload. Length: {len(payload_bytes)}")
-            elif isinstance(invocation_data.payload, bytes):
-                logger.info(f"RPC HandleFrontendButton: Payload is already bytes. Length: {len(invocation_data.payload)}")
-                payload_bytes = invocation_data.payload
-            else:
-                logger.error(f"RPC HandleFrontendButton: Cannot handle payload type {type(invocation_data.payload)}")
-                error_response = interaction_pb2.AgentResponse(status_message=f"Error: Unhandled payload type {type(invocation_data.payload)}", data_payload="")
-                serialized_error = error_response.SerializeToString()
-                return base64.b64encode(serialized_error).decode('utf-8')
+            base64_decoded_payload = base64.b64decode(raw_payload.payload)
+            request = interaction_pb2.FrontendButtonClickRequest()
+            request.ParseFromString(base64_decoded_payload)
+            logger.info(f"RPC HandleFrontendButton: Decoded request: button_id='{request.button_id}', custom_data='{request.custom_data}'")
+        except Exception as e_decode:
+            logger.error(f"RPC HandleFrontendButton: Error decoding RpcInvocationData payload: {e_decode}", exc_info=True)
+            error_response_pb = interaction_pb2.AgentResponse(status_message=f"Error decoding request payload: {e_decode}")
+            return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')
+
+        try:
+            # Ensure agent_instance and _job_ctx are available
+            if not self.agent_instance or \
+               not hasattr(self.agent_instance, '_job_ctx') or \
+               not self.agent_instance._job_ctx or \
+               not self.agent_instance._job_ctx.room or \
+               not self.agent_instance._job_ctx.room.local_participant:
+                logger.error("RPC HandleFrontendButton: agent_instance, _job_ctx, room, or local_participant not available. Cannot proceed.")
+                error_response_pb = interaction_pb2.AgentResponse(status_message="Internal server error: agent context not ready.")
+                return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')
+
+            caller_identity = self.agent_instance._job_ctx.room.local_participant.identity
+            logger.info(f"RPC HandleFrontendButton: Caller identity from JobContext: {caller_identity}")
+
+            if request.button_id == "send_test_request_to_backend_api":
+                logger.info("RPC: 'send_test_request_to_backend_api' button clicked. Creating task for _send_test_request_to_backend.")
+                asyncio.create_task(self._send_test_request_to_backend(self.agent_instance._job_ctx, request, caller_identity))
+                logger.info("RPC: Created async task to send test request to backend API")
             
-            logger.info(f"Attempting to parse protobuf message from payload. First 100 bytes: {payload_bytes[:100]}")
-            request.ParseFromString(payload_bytes)
-            logger.info(f"Successfully parsed FrontendButtonClickRequest: button_id={request.button_id}, custom_data={request.custom_data}")
-        except Exception as e:
-            logger.error(f"RPC HandleFrontendButton: Failed to parse payload into FrontendButtonClickRequest: {e}", exc_info=True)
-            logger.error(f"Received payload (first 100 bytes): {payload_bytes[:100] if 'payload_bytes' in locals() else 'unknown'}")
-            error_response = interaction_pb2.AgentResponse(
-                status_message=f"Error processing request: {str(e)}",
-                data_payload="Parse error"
-            )
-            serialized_error = error_response.SerializeToString()
-            return base64.b64encode(serialized_error).decode('utf-8')
+            elif request.button_id == "test_rpc_button":
+                logger.info("RPC: 'test_rpc_button' clicked. Processing custom_data and initiating LangGraph request.")
+                # Process custom_data (copied from below, simplified for this block)
+                if request.custom_data:
+                    logger.info(f"RPC (test_rpc_button): Raw custom_data received: {request.custom_data}")
+                    raw_custom_str = request.custom_data
+                    default_user_id = f"default_{caller_identity or 'user'}"
+                    parsed_custom_data = {}
+                    try:
+                        data = json.loads(raw_custom_str)
+                        if isinstance(data, dict):
+                            parsed_custom_data = data
+                            if "user_id" not in parsed_custom_data: parsed_custom_data["user_id"] = default_user_id
+                        else:
+                            parsed_custom_data = {"user_id": default_user_id, "value": data}
+                    except json.JSONDecodeError:
+                        parsed_custom_data = {"user_id": default_user_id, "message": raw_custom_str}
+                    except Exception as e_custom_data_parse: # Simplified error handling for brevity
+                        logger.error(f"RPC (test_rpc_button): Error processing custom_data: {e_custom_data_parse}")
+                        parsed_custom_data = {"user_id": default_user_id, "error": "custom_data_processing_error"}
 
-        logger.info(f"RPC: HandleFrontendButton called by participant: {invocation_data.caller_identity}")
-        logger.info(f"RPC: Request button_id='{request.button_id}', custom_data='{request.custom_data}'")
+                    self.agent_instance._latest_student_context = parsed_custom_data
+                    logger.info(f"RPC (test_rpc_button): Updated agent_instance._latest_student_context with: {parsed_custom_data}")
+                    # Handle session ID (copied and simplified)
+                    if isinstance(parsed_custom_data, dict) and 'session_id' in parsed_custom_data:
+                        self.agent_instance._latest_session_id = parsed_custom_data['session_id']
+                    elif isinstance(parsed_custom_data, dict) and 'sessionId' in parsed_custom_data: # Check for sessionId as well
+                        self.agent_instance._latest_session_id = parsed_custom_data['sessionId']
+                    elif not hasattr(self.agent_instance, '_latest_session_id') or not self.agent_instance._latest_session_id:
+                        new_session_id = f"session_{uuid.uuid4().hex}"
+                        self.agent_instance._latest_session_id = new_session_id
+                        if isinstance(parsed_custom_data, dict) and "error" not in parsed_custom_data:
+                             parsed_custom_data['session_id'] = new_session_id # Add to context if created
+                    logger.info(f"RPC (test_rpc_button): Agent session ID is now: {getattr(self.agent_instance, '_latest_session_id', 'not set')}")
 
-        # Process custom_data if present and agent_instance exists
-        if self.agent_instance and request.custom_data:
-            try: # Line 65
-                # Log the raw custom_data for debugging
-                logger.info(f"RPC: Raw custom_data received: {request.custom_data}")
-                
-                raw_custom_str = request.custom_data
-                default_user_id = f"default_{invocation_data.caller_identity or 'user'}"
-                parsed_custom_data = {} # Initialize
+                # Initiate LangGraph request
+                logger.info("RPC (test_rpc_button): Creating task to send request to LangGraph service.")
+                asyncio.create_task(self._send_test_request_to_backend(self.agent_instance._job_ctx, request, caller_identity))
+                logger.info("RPC (test_rpc_button): Created async task to send request to LangGraph service.")
 
+                # Send specific UI alert for this button
                 try:
-                    # Attempt to parse as JSON
+                    action_data_for_agent = {
+                        "action_type_str": "SHOW_ALERT",
+                        "request_id": str(uuid.uuid4()),
+                        "parameters": {
+                            "title": "LangGraph Request",
+                            "message": f"Button '{request.button_id}' clicked. Sending request to LangGraph...",
+                            "buttons": [{"label": "OK", "action": {"action_type": interaction_pb2.UIAction.ActionType.DISMISS_ALERT}}]
+                        }
+                    }
+                    await self.agent_instance.send_ui_action_to_frontend(
+                        action_data=action_data_for_agent,
+                        target_identity=caller_identity,
+                        job_ctx_override=self.agent_instance._job_ctx
+                    )
+                    logger.info(f"RPC (test_rpc_button): Successfully sent UI alert for LangGraph initiation to {caller_identity}")
+                except Exception as e_ui_action:
+                    logger.error(f"RPC (test_rpc_button): Error sending UI alert: {e_ui_action}", exc_info=True)
+            
+            # Fallback for other buttons with custom_data that are not 'send_test_request_to_backend_api' or 'test_rpc_button'
+            elif request.custom_data: 
+                logger.info(f"RPC: Processing custom_data for button_id '{request.button_id}'.")
+                # Full custom_data processing logic (lines 53-94 from original)
+                raw_custom_str = request.custom_data
+                default_user_id = f"default_{caller_identity or 'user'}"
+                parsed_custom_data = {} 
+                try:
                     data = json.loads(raw_custom_str)
                     if isinstance(data, dict):
                         parsed_custom_data = data
@@ -80,170 +124,82 @@ class AgentInteractionService: # Simple class without inheritance
                             logger.info(f"RPC: Parsed JSON dict is missing 'user_id'. Adding default: {default_user_id}")
                             parsed_custom_data["user_id"] = default_user_id
                     else:
-                        # JSON, but not a dict (e.g., a list, string, number)
                         logger.info(f"RPC: custom_data parsed as JSON but is not a dict (type: {type(data)}). Wrapping it.")
-                        parsed_custom_data = {
-                            "user_id": default_user_id,
-                            "value": data  # Store the non-dict JSON data under 'value'
-                        }
+                        parsed_custom_data = {"user_id": default_user_id, "value": data}
                 except json.JSONDecodeError:
-                    # Not valid JSON, treat as a plain string message
                     logger.info(f"RPC: json.loads failed for custom_data. Treating as plain string. Data: '{raw_custom_str}'")
-                    parsed_custom_data = {
-                        "user_id": default_user_id,
-                        "message": raw_custom_str # Store plain string under 'message'
-                    }
-                except Exception as e:
-                    # Catch-all for other unexpected errors during the above processing
-                    logger.error(f"RPC: Unexpected error processing custom_data '{raw_custom_str}': {e}", exc_info=True)
-                    parsed_custom_data = {
-                        "user_id": default_user_id,
-                        "error": "custom_data_processing_error",
-                        "original_custom_data": raw_custom_str,
-                        "exception": str(e)
-                    }
+                    parsed_custom_data = {"user_id": default_user_id, "message": raw_custom_str}
+                except Exception as e_custom_data_parse:
+                    logger.error(f"RPC: Unexpected error processing custom_data '{raw_custom_str}': {e_custom_data_parse}", exc_info=True)
+                    parsed_custom_data = {"user_id": default_user_id, "error": "custom_data_processing_error", "original_custom_data": raw_custom_str, "exception": str(e_custom_data_parse)}
                 
-                # Ensure parsed_custom_data is always a dict and has a user_id if not an error structure
                 if not isinstance(parsed_custom_data, dict):
-                     logger.error("RPC: parsed_custom_data is not a dict after processing. This is unexpected. Forcing error structure.")
-                     parsed_custom_data = {
-                        "user_id": default_user_id,
-                        "error": "internal_custom_data_handling_failed",
-                        "original_custom_data": raw_custom_str
-                     }
-                elif "user_id" not in parsed_custom_data and "error" not in parsed_custom_data : # Check if it's a dict but missing user_id and not an error dict
-                    logger.warning(f"RPC: Processed custom_data is a dict but missing 'user_id'. Adding default: {default_user_id}")
+                     parsed_custom_data = {"user_id": default_user_id, "error": "internal_custom_data_handling_failed", "original_custom_data": raw_custom_str}
+                elif "user_id" not in parsed_custom_data and "error" not in parsed_custom_data:
                     parsed_custom_data["user_id"] = default_user_id
 
-                # Store the validated context
-                if self.agent_instance:
-                    self.agent_instance._latest_student_context = parsed_custom_data
-                    logger.info(f"RPC: Updated agent_instance._latest_student_context with: {parsed_custom_data}")
+                self.agent_instance._latest_student_context = parsed_custom_data
+                logger.info(f"RPC: Updated agent_instance._latest_student_context with: {parsed_custom_data}")
+                
+                if isinstance(parsed_custom_data, dict) and 'session_id' in parsed_custom_data:
+                    self.agent_instance._latest_session_id = parsed_custom_data['session_id']
+                elif isinstance(parsed_custom_data, dict) and 'sessionId' in parsed_custom_data:
+                    self.agent_instance._latest_session_id = parsed_custom_data['sessionId']
+                elif not hasattr(self.agent_instance, '_latest_session_id') or not self.agent_instance._latest_session_id:
+                    new_session_id = f"session_{uuid.uuid4().hex}"
+                    self.agent_instance._latest_session_id = new_session_id
+                    if isinstance(parsed_custom_data, dict) and "error" not in parsed_custom_data:
+                        parsed_custom_data['session_id'] = new_session_id
+                logger.info(f"RPC: Agent session ID is now: {getattr(self.agent_instance, '_latest_session_id', 'not set')}")
 
-                    # Handle session ID (prioritize session_id over sessionId)
-                    if isinstance(parsed_custom_data, dict) and 'session_id' in parsed_custom_data:
-                        self.agent_instance._latest_session_id = parsed_custom_data['session_id']
-                        logger.info(f"RPC: Updated agent_instance._latest_session_id with: {parsed_custom_data['session_id']}")
-                    elif isinstance(parsed_custom_data, dict) and 'sessionId' in parsed_custom_data: # Fallback for camelCase
-                        self.agent_instance._latest_session_id = parsed_custom_data['sessionId']
-                        logger.info(f"RPC: Updated agent_instance._latest_session_id with (from sessionId): {parsed_custom_data['sessionId']}")
-                    else:
-                        # Generate a session ID if none exists or not found in custom_data
-                        if not hasattr(self.agent_instance, '_latest_session_id') or not self.agent_instance._latest_session_id:
-                            new_session_id = f"session_{uuid.uuid4().hex}" # Use .hex for a clean string
-                            self.agent_instance._latest_session_id = new_session_id
-                            if isinstance(parsed_custom_data, dict) and "error" not in parsed_custom_data:
-                                parsed_custom_data['session_id'] = new_session_id
-                                logger.info(f"RPC: Generated new session_id: {new_session_id}. Agent session ID updated and added to parsed_custom_data.")
-                            else: 
-                                logger.info(f"RPC: Generated new session_id: {new_session_id}. Agent session ID updated. Not adding to parsed_custom_data as it's not a valid dict or is an error structure.")
-                else:
-                    logger.warning("RPC: agent_instance is None, cannot update context or session ID.")
-                
-                # Prepare UI action data for client-side RPC
-                action_data_for_client_rpc = {
-                    "action_type_str": "SHOW_ALERT", 
-                    "parameters": { 
-                        "title": "Button Clicked",
-                        "message": f"Button '{request.button_id}' was clicked by {invocation_data.caller_identity}. Context updated.",
-                        "buttons": [
-                            {
-                                "label": "OK",
-                                "action": {"action_type": interaction_pb2.UIAction.ActionType.DISMISS_ALERT} 
-                            }
-                        ]
-                    }
-                }
-                logger.info(f"RPC: Preparing UI action (alert) data for client-side RPC: {action_data_for_client_rpc['parameters']}")
-                logger.info(f"RPC DEBUG: Type of self.agent_instance: {type(self.agent_instance)}")
-                
+                # Generic UI action for other buttons with custom_data
                 try:
-                    alert_params = action_data_for_client_rpc.get('parameters', {})
-                    alert_buttons_data = alert_params.get('buttons', [])
-                    
-                    alert_parameters_for_rpc = {}
-                    raw_alert_params = action_data_for_client_rpc.get('parameters', {})
-
-                    for key, value in raw_alert_params.items():
-                        if isinstance(value, (dict, list)):
-                            alert_parameters_for_rpc[key] = json.dumps(value)
-                        else:
-                            alert_parameters_for_rpc[key] = str(value)
-                    
-                    logger.info(f"RPC: Serialized alert parameters for AgentToClientUIActionRequest: {alert_parameters_for_rpc}")
-
-                    payload = interaction_pb2.AgentToClientUIActionRequest(
-                        request_id=str(uuid.uuid4()),
-                        action_type=interaction_pb2.ClientUIActionType.SHOW_ALERT, # This is from action_data_for_client_rpc
-                        parameters=alert_parameters_for_rpc
-                    )
-                    payload_bytes = payload.SerializeToString()
-
-                    # This is where we might trigger a backend call or another UI action
-                    # For now, let's just log and maybe echo a response.
-                    # Example of sending a UI action back to the frontend:
-                    target_client_identity = invocation_data.caller_identity
-
-                    # CONSTRUCT THE DICTIONARY for the send_ui_action_to_frontend method
-                    action_data_for_agent = {
-                        "action_type_str": "SHOW_ALERT", # Example action, maps to ClientUIActionType enum
-                        "request_id": str(uuid.uuid4()),
-                        "parameters": {
-                            "title": "Backend Test", 
-                            "message": f"Button '{request.button_id}' clicked."
+                    action_data_for_client_rpc = {
+                        "action_type_str": "SHOW_ALERT", 
+                        "parameters": { 
+                            "title": "Button Clicked",
+                            "message": f"Button '{request.button_id}' was clicked by {caller_identity}. Context updated.",
+                            "buttons": [{"label": "OK", "action": {"action_type": interaction_pb2.UIAction.ActionType.DISMISS_ALERT}}]
                         }
                     }
-
-                    # The actual call that is causing the error - NOW FIXED
+                    logger.info(f"RPC: Preparing UI action (alert) data for client-side RPC: {action_data_for_client_rpc['parameters']}")
+                    
+                    action_data_for_agent = {
+                        "action_type_str": "SHOW_ALERT",
+                        "request_id": str(uuid.uuid4()),
+                        "parameters": {"title": "Backend Test", "message": f"Button '{request.button_id}' clicked."}
+                    }
                     await self.agent_instance.send_ui_action_to_frontend(
                         action_data=action_data_for_agent, 
-                        target_identity=target_client_identity,
-                        job_ctx_override=self.agent_instance._job_ctx # Use JobContext from RpcInvocationData
+                        target_identity=caller_identity,
+                        job_ctx_override=self.agent_instance._job_ctx
                     )
-                    logger.info(f"RPC: Successfully called send_ui_action_to_frontend for {target_client_identity}")
-                except Exception as e:
-                    logger.error(f"Error in HandleFrontendButton while sending UI action: {e}")
-            except Exception as main_e: 
-                logger.error(f"RPC: Error processing custom_data or sending alert: {main_e}", exc_info=True)
-        elif not self.agent_instance:
-            logger.warning("RPC: agent_instance is not available. Cannot update context.")
-        elif not request.custom_data:
-            logger.info("RPC: No custom_data received in this request.")
-        
-        # Send a test request to the backend to verify context passing
-        if self.agent_instance:
-            try:
-                import aiohttp
-                
-                # Create a task to send the request asynchronously
-                loop = asyncio.get_event_loop()
-                task = asyncio.create_task(self._send_test_request_to_backend(job_ctx=self.agent_instance._job_ctx, invocation_data=invocation_data)) # Pass JobContext
-                
-                # Log that we're sending a test request
-                logger.info("RPC: Created async task to send test request to backend API")
-            except Exception as e:
-                logger.error(f"RPC: Failed to create test request task: {e}")
-        
-        response_message = f"Button '{request.button_id}' click processed by RoxAgent."
-        if request.custom_data:
-            response_message += f" Data: '{request.custom_data}'"
+                    logger.info(f"RPC: Successfully called send_ui_action_to_frontend for {caller_identity}")
+                except Exception as e_ui_action:
+                    logger.error(f"Error in HandleFrontendButton while sending UI action: {e_ui_action}", exc_info=True)
+            else: # No custom_data
+                logger.info("RPC: No custom_data received in this request.")
 
-        response = interaction_pb2.AgentResponse(
-            status_message=response_message,
-            data_payload="Successfully processed by agent."
-        )
+            # Final response after all processing
+            response_message = f"Button '{request.button_id}' click processed by RoxAgent."
+            if request.custom_data:
+                response_message += f" Data processed."
+            
+            response_pb = interaction_pb2.AgentResponse(
+                status_message=response_message,
+                data_payload="Successfully processed by agent."
+            )
+            serialized_response = response_pb.SerializeToString()
+            return base64.b64encode(serialized_response).decode('utf-8')
+
+        except Exception as main_e: 
+            logger.error(f"RPC HandleFrontendButton: General error processing request: {main_e}", exc_info=True)
+            error_response_pb = interaction_pb2.AgentResponse(status_message=f"Error processing request: {main_e}")
+            return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')
         
-        logger.info(f"Sending response: {response}")
-        serialized_response = response.SerializeToString()
-        logger.info(f"Serialized response length: {len(serialized_response)} bytes")
-        
-        base64_response = base64.b64encode(serialized_response).decode('utf-8')
-        logger.info(f"Base64 encoded response length: {len(base64_response)} characters")
-        
-        return base64_response
-        
-    async def _send_test_request_to_backend(self, job_ctx: JobContext, invocation_data: RpcInvocationData):
+    async def _send_test_request_to_backend(self, job_ctx: JobContext, parsed_request: interaction_pb2.FrontendButtonClickRequest, caller_identity: str) -> None:
         """Send a request to the backend API and handle the streaming response."""
+        logger.info("!!!!!! DEBUG: _send_test_request_to_backend ENTERED (once) !!!!!!")
         import aiohttp
         import os
         import json # Ensure json is imported
@@ -351,96 +307,164 @@ class AgentInteractionService: # Simple class without inheritance
             logger.error(f"Connection error sending request to backend: {e}")
         except Exception as e:
             logger.error(f"An unexpected error occurred in _send_test_request_to_backend: {e}", exc_info=True)
-    async def NotifyPageLoad(self, invocation_data: RpcInvocationData) -> str:
-        logger.info(f"RPC NotifyPageLoad: Received call from participant: {invocation_data.caller_identity}")
+            # Use the already parsed_request and caller_identity
+            button_id_for_backend = parsed_request.button_id
+            custom_data_for_backend = parsed_request.custom_data
+            logger.info(f"_send_test_request_to_backend: Processing button_id: {button_id_for_backend}, custom_data: {custom_data_for_backend} for caller: {caller_identity}")
 
-        request = interaction_pb2.NotifyPageLoadRequest()
+    async def NotifyPageLoad(self, raw_payload: RpcInvocationData) -> str:
+        logger.info("[RPC DEBUG] NotifyPageLoad method invoked by frontend (via RpcInvocationData).")
         try:
-            if isinstance(invocation_data.payload, str):
-                logger.info(f"RPC NotifyPageLoad: Payload is a string, assuming base64 encoded. Length: {len(invocation_data.payload)}")
-                try:
-                    decoded_bytes = base64.b64decode(invocation_data.payload)
-                    payload_bytes = decoded_bytes
-                except Exception as e:
-                    logger.error(f"RPC NotifyPageLoad: Failed to decode base64 payload: {e}")
-                    payload_bytes = invocation_data.payload.encode('utf-8') # Fallback
-            elif isinstance(invocation_data.payload, bytes):
-                logger.info(f"RPC NotifyPageLoad: Payload is already bytes. Length: {len(invocation_data.payload)}")
-                payload_bytes = invocation_data.payload
-            else:
-                logger.error(f"RPC NotifyPageLoad: Cannot handle payload type {type(invocation_data.payload)}")
-                error_response = interaction_pb2.AgentResponse(status_message=f"Error: Unhandled payload type {type(invocation_data.payload)}")
-                serialized_error = error_response.SerializeToString()
-                return base64.b64encode(serialized_error).decode('utf-8')
+            base64_decoded_payload = base64.b64decode(raw_payload.payload)
+            request = interaction_pb2.NotifyPageLoadRequest()
+            request.ParseFromString(base64_decoded_payload)
+            logger.info(f"RPC NotifyPageLoad: Decoded request: user_id='{request.user_id}', page='{request.current_page}', session_id='{request.session_id}'")
+        except Exception as e_decode:
+            logger.error(f"RPC NotifyPageLoad: Error decoding RpcInvocationData payload: {e_decode}", exc_info=True)
+            error_response_pb = interaction_pb2.AgentResponse(status_message=f"Error decoding request payload: {e_decode}")
+            return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')
 
-            request.ParseFromString(payload_bytes)
-            logger.info(f"RPC NotifyPageLoad: Successfully parsed NotifyPageLoadRequest: user_id='{request.user_id}', page='{request.current_page}', session_id='{request.session_id}'")
+        caller_identity = "unknown_caller" # Default
+        try:
+            if not self.agent_instance or not hasattr(self.agent_instance, '_job_ctx') or not self.agent_instance._job_ctx or not self.agent_instance._job_ctx.participant:
+                logger.warning("RPC NotifyPageLoad: agent_instance, _job_ctx, or participant not available. Cannot retrieve caller identity.")
+            else:
+                caller_identity = self.agent_instance._job_ctx.participant.identity
+                logger.info(f"RPC NotifyPageLoad: Caller identity from JobContext: {caller_identity}")
+
+            # Update agent context with page load information
+            if self.agent_instance:
+                self.agent_instance.update_agent_context(
+                    user_id=request.user_id,
+                    session_id=request.session_id,
+                    current_page=request.current_page,
+                    interaction_type="page_load"
+                )
+                logger.info(f"Agent context updated for user '{request.user_id}' on page '{request.current_page}'.")
+
+                # Send a UI action to the frontend (e.g., start a timer)
+                # The actual sending of UI action should be handled by the agent instance, 
+                # possibly by calling a method on self.agent_instance that knows how to dispatch it correctly.
+                # For example: await self.agent_instance.dispatch_ui_action_to_participant(caller_identity, "START_TIMER", {"duration": 300, "message": "Timer started by NotifyPageLoad"})
+                logger.info(f"Attempting to trigger START_TIMER UI action for participant '{caller_identity}'.")
+                # This is a conceptual call. The RoxAgent needs a method to handle this.
+                # For now, we assume such a mechanism exists or will be added to RoxAgent.
+                # Example: await self.agent_instance.send_ui_action_to_participant(caller_identity, interaction_pb2.UserInterfaceAction(action_id="START_TIMER", details_json=json.dumps({"duration": 300}))) 
+                # This part is simplified as the actual dispatch logic is within RoxAgent.
+
+            response_pb = interaction_pb2.AgentResponse(
+                status_message="Page load notified and context updated.",
+                data_payload=json.dumps({"page": request.current_page, "user_id": request.user_id})
+            )
+            serialized_response = response_pb.SerializeToString()
+            return base64.b64encode(serialized_response).decode('utf-8')
 
         except Exception as e:
-            logger.error(f"RPC NotifyPageLoad: Failed to parse payload: {e}", exc_info=True)
-            error_response = interaction_pb2.AgentResponse(
-                status_message=f"Error processing NotifyPageLoad request: {str(e)}",
-                data_payload="Parse error"
-            )
-            serialized_error = error_response.SerializeToString()
-            return base64.b64encode(serialized_error).decode('utf-8')
+            logger.error(f"RPC NotifyPageLoad: Error processing request: {e}", exc_info=True)
+            error_response_pb = interaction_pb2.AgentResponse(status_message=f"Error processing NotifyPageLoad: {e}")
+            return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')
 
-        if self.agent_instance:
-            # Update agent's context
-            page_load_context = {
-                "user_id": request.user_id,
-                "task_stage": request.task_stage,
-                "current_page": request.current_page,
-                "session_id": request.session_id,
-                "chat_history": request.chat_history, # Assuming it's a JSON string as sent by client
-                "transcript": request.transcript, # Optional field
-                "page_load_timestamp": time.time()
+    async def NotifyPageLoadV2(self, raw_payload: RpcInvocationData) -> str: # Returns str
+        logger.info("[RPC V2 DEBUG] NotifyPageLoadV2 method invoked. Attempting LangGraph integration.")
+        try:
+            caller_identity = raw_payload.caller_identity # This comes from RpcInvocationData directly
+            
+            # 1. Decode and Parse Protobuf Payload
+            if not raw_payload.payload:
+                logger.error("RPC NotifyPageLoadV2: Raw payload is empty.")
+                raise ValueError("Payload is empty")
+
+            base64_decoded_payload = base64.b64decode(raw_payload.payload)
+            # Assuming NotifyPageLoadRequestV2 is defined in your interaction_pb2
+            # If it's a different proto, adjust interaction_pb2.NotifyPageLoadRequestV2 accordingly.
+            # For now, let's assume it's the same as NotifyPageLoadRequest for structure,
+            # or a new NotifyPageLoadRequestV2 if you've defined one.
+            # Let's use a generic name `parsed_page_load_request`
+            parsed_page_load_request = interaction_pb2.NotifyPageLoadRequest() # Or NotifyPageLoadRequestV2
+            parsed_page_load_request.ParseFromString(base64_decoded_payload)
+
+            logger.info(f"RPC NotifyPageLoadV2: Decoded request from {caller_identity}: user_id='{parsed_page_load_request.user_id}', page='{parsed_page_load_request.current_page}', session_id='{parsed_page_load_request.session_id}', task_stage='{parsed_page_load_request.task_stage}'")
+
+            # 2. Populate agent context
+            if not self.agent_instance:
+                logger.error("RPC NotifyPageLoadV2: agent_instance is not available. Cannot set context or call LangGraph.")
+                raise RuntimeError("Agent instance not available")
+
+            student_context_message = f"User '{parsed_page_load_request.user_id}' loaded page '{parsed_page_load_request.current_page}' during task stage '{parsed_page_load_request.task_stage}'."
+            
+            student_context = {
+                "user_id": parsed_page_load_request.user_id,
+                "session_id": parsed_page_load_request.session_id,
+                "current_page": parsed_page_load_request.current_page,
+                "task_stage": parsed_page_load_request.task_stage,
+                "message": student_context_message, # This will be used as 'transcript' by _send_test_request_to_backend
+                "room_state": parsed_page_load_request.room_state, # Assuming room_state is part of NotifyPageLoadRequest
+                "event_type": "page_load" 
             }
-            self.agent_instance._latest_student_context = page_load_context
-            self.agent_instance._latest_session_id = request.session_id
-            logger.info(f"RPC NotifyPageLoad: Agent context updated. User: '{request.user_id}', Page: '{request.current_page}', Session: '{request.session_id}'")
-            logger.debug(f"RPC NotifyPageLoad: Full context updated: {page_load_context}")
+            self.agent_instance._latest_student_context = student_context
+            self.agent_instance._latest_session_id = parsed_page_load_request.session_id
+            logger.info(f"RPC NotifyPageLoadV2: Updated agent context: {student_context}")
+            logger.info(f"RPC NotifyPageLoadV2: Agent session ID is now: {self.agent_instance._latest_session_id}")
 
-            # --- START MODIFICATION FOR TIMER TEST ---
-            if request.current_page == 'writingpractisetest':
-                logger.info(f"RPC NotifyPageLoad: Page is 'writingpractisetest'. Attempting to send START_TIMER command to {invocation_data.caller_identity}.")
-                try:
-                    timer_duration = 10  # seconds
-                    ui_action_request = interaction_pb2.AgentToClientUIActionRequest(
-                        request_id=str(uuid.uuid4()),
-                        action_type=interaction_pb2.ClientUIActionType.START_TIMER,
-                        parameters={"duration_seconds": str(timer_duration)}
-                    )
-                    
-                    if hasattr(self.agent_instance, 'send_action_to_participant'):
-                        await self.agent_instance.send_action_to_participant(
-                            participant_identity=invocation_data.caller_identity,
-                            action_request=ui_action_request
-                        )
-                        logger.info(f"RPC NotifyPageLoad: START_TIMER command ({timer_duration}s) sent to {invocation_data.caller_identity}.")
-                    elif hasattr(self.agent_instance, '_room_manager') and hasattr(self.agent_instance._room_manager, 'send_action_to_participant_in_default_room'):
-                         await self.agent_instance._room_manager.send_action_to_participant_in_default_room(
-                            participant_identity=invocation_data.caller_identity,
-                            action_request=ui_action_request
-                        )
-                         logger.info(f"RPC NotifyPageLoad: START_TIMER command ({timer_duration}s) sent via RoomManager to {invocation_data.caller_identity}.")
-                    else:
-                        logger.error("RPC NotifyPageLoad: Agent instance does not have a recognized method to send action to participant. Timer not started.")
+            # 3. Call LangGraph service
+            # _send_test_request_to_backend expects (self, job_ctx, parsed_request_proto, caller_identity)
+            # We don't have a job_ctx directly here, but it might be accessible via self.agent_instance._job_ctx
+            # The parsed_request_proto is FrontendButtonClickRequest for it. We have NotifyPageLoadRequest.
+            # However, it primarily uses self.agent_instance._latest_student_context.
+            job_ctx_for_langgraph = getattr(self.agent_instance, '_job_ctx', None)
+            if not job_ctx_for_langgraph:
+                logger.warning("RPC NotifyPageLoadV2: _job_ctx not found on agent_instance. LangGraph call might have limited context.")
+            
+            logger.info("RPC NotifyPageLoadV2: Creating task to send request to LangGraph service.")
+            # Passing None for parsed_request as _send_test_request_to_backend should use the context we just set.
+            asyncio.create_task(self._send_test_request_to_backend(job_ctx_for_langgraph, None, caller_identity))
+            logger.info("RPC NotifyPageLoadV2: Created async task to send request to LangGraph service.")
 
-                except Exception as e:
-                    logger.error(f"RPC NotifyPageLoad: Failed to send START_TIMER command: {e}", exc_info=True)
-            # --- END MODIFICATION FOR TIMER TEST ---
+            # 4. Return response to frontend
+            response_data = {
+                "status": "success",
+                "message": f"NotifyPageLoadV2 processed for {caller_identity}. LangGraph request initiated for page '{parsed_page_load_request.current_page}'.",
+                "details": {
+                    "user_id": parsed_page_load_request.user_id,
+                    "session_id": parsed_page_load_request.session_id,
+                    "page": parsed_page_load_request.current_page
+                }
+            }
+            json_response_str = json.dumps(response_data)
+            base64_response_str = base64.b64encode(json_response_str.encode('utf-8')).decode('utf-8')
+            
+            logger.info("RPC NotifyPageLoadV2: Sending base64 JSON string response indicating LangGraph initiation.")
+            return base64_response_str
 
-            status_msg = f"Page load notification for '{request.current_page}' by user '{request.user_id}' received and processed."
-            data_payload_str = f"Session ID: {request.session_id}, Context Updated."
-        else:
-            logger.warning("RPC NotifyPageLoad: agent_instance is None. Cannot update context.")
-            status_msg = "Page load notification received, but agent instance not available to update context."
-            data_payload_str = "Agent instance not found."
+        except Exception as e:
+            logger.error(f"RPC NotifyPageLoadV2: Error: {e}", exc_info=True)
+            # Ensure a consistent error response format
+            error_response_data = {
+                "status": "error", 
+                "message": f"Error in NotifyPageLoadV2: {str(e)}",
+                "details": {} # Add more error details if available
+            }
+            json_error_str = json.dumps(error_response_data)
+            base64_error_str = base64.b64encode(json_error_str.encode('utf-8')).decode('utf-8')
+            return base64_error_str
 
-        response = interaction_pb2.AgentResponse(
-            status_message=status_msg,
-            data_payload=data_payload_str
-        )
-        serialized_response = response.SerializeToString()
-        return base64.b64encode(serialized_response).decode('utf-8')
+    async def TestPing(self, raw_payload: RpcInvocationData) -> str: # Returns str
+        logger.info(f"[RPC DEBUG] TestPing method invoked by {raw_payload.caller_identity} (expecting Empty payload).")
+        try:
+            # The payload for TestPing is google.protobuf.Empty, no need to parse its content.
+            # We can optionally decode and verify it's an Empty message if strictness is needed,
+            # but for a ping, just acknowledging the call is usually enough.
+            logger.info(f"RPC TestPing: Received ping from: {raw_payload.caller_identity}. Payload type should be Empty.")
+
+            response_pb = interaction_pb2.AgentResponse(
+                status_message="Pong! TestPing successful."
+            )
+            # Return as base64 encoded string, matching google.protobuf.StringValue in proto
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+
+        except Exception as e:
+            logger.error(f"RPC TestPing: Error: {e}", exc_info=True)
+            error_response_pb = interaction_pb2.AgentResponse(
+                status_message=f"Error in TestPing: {str(e)}"
+            )
+            return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')

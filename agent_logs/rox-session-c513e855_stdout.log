@@ -1,0 +1,115 @@
+2025-06-16 14:16:18,494 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m[0m
+2025-06-16 14:16:18,495 - [35mDEV [0m livekit.agents - Watching /Users/drsudhanshu/Desktop/bidirectionalflow/livekit-service/rox [90m[0m
+2025-06-16 14:16:18,949 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m[0m
+2025-06-16 14:16:18,960 - [32mINFO[0m livekit.agents - starting worker [90m{"version": "1.0.21", "rtc-version": "1.0.6"}[0m
+2025-06-16 14:16:18,960 - [32mINFO[0m livekit.agents - starting inference executor [90m[0m
+2025-06-16 14:16:18,963 - [32mINFO[0m livekit.agents - initializing process [90m{"pid": 70711, "inference": true}[0m
+2025-06-16 14:16:19,340 - [36mDEBUG[0m livekit.agents - initializing inference runner [90m{"runner": "lk_end_of_utterance_multilingual", "pid": 70711, "inference": true}[0m
+2025-06-16 14:16:20,937 - [36mDEBUG[0m livekit.agents - inference runner initialized [90m{"runner": "lk_end_of_utterance_multilingual", "elapsed_time": 1.5964644169434905, "pid": 70711, "inference": true}[0m
+2025-06-16 14:16:20,940 - [32mINFO[0m livekit.agents - process initialized [90m{"pid": 70711, "inference": true, "elapsed_time": 1.98}[0m
+2025-06-16 14:16:20,938 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m{"pid": 70711, "inference": true}[0m
+2025-06-16 14:16:20,944 - [32mINFO[0m livekit.agents - [1msee tracing information at http://localhost:59578/debug[0m [90m[0m
+2025-06-16 14:16:21,194 - [32mINFO[0m livekit.agents - registered worker [90m{"id": "AW_YZhMchjoHCXj", "url": "wss://shodhai-pojmjchi.livekit.cloud", "region": "India", "protocol": 16}[0m
+2025-06-16 14:16:21,266 - [32mINFO[0m livekit.agents - received job request [90m{"job_id": "AJ_a7dqE99Q7jdG", "dispatch_id": "", "room_name": "rox-session-c513e855", "agent_name": "", "resuming": false}[0m
+2025-06-16 14:16:21,331 - [32mINFO[0m livekit.agents - initializing process [90m{"pid": 70716}[0m
+2025-06-16 14:16:22,421 - [32mINFO[0m livekit.agents - process initialized [90m{"pid": 70716, "elapsed_time": 1.09}[0m
+2025-06-16 14:16:22,418 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m{"pid": 70716}[0m
+2025-06-16 14:16:22,425 - [32mINFO[0m __mp_main__ - Agent identity set to: ai-assistant [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,547 - [32mINFO[0m __mp_main__ - Successfully connected to LiveKit room 'rox-session-c513e855' as 'ai-assistant' [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,548 - [32mINFO[0m __mp_main__ - Runtime Config -- Page: roxpage, TTS: aura-asteria-en, Temp: 0.7, Avatar: False [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,548 - [32mINFO[0m custom_llm - CustomLLMBridge initialized with RoxAgent reference. Streaming URL: http://localhost:8080/process_interaction_streaming for page: None [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,549 - [32mINFO[0m __mp_main__ - RoxAgent.__init__: self (type: <class '__mp_main__.RoxAgent'>) is a JobContext. self._room initially: None [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,549 - [32mINFO[0m __mp_main__ - RoxAgent.__init__ called for page_path: rox-session-c513e855. Attributes: ['HandleFrontendButton', 'NotifyPageLoadV2', 'TestPing', '__class__', '__delattr__', '__dict__', '__dir__', '__doc__', '__eq__', '__firstlineno__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__static_attributes__', '__str__', '__subclasshook__', '__weakref__', '_activity', '_allow_interruptions', '_chat_ctx', '_get_activity_or_raise', '_instructions', '_interaction_service_registered', '_job_ctx', '_latest_session_id', '_latest_student_context', '_llm', '_mcp_servers', '_room', '_send_request_to_langgraph', '_stt', '_tools', '_tts', '_turn_detection', '_vad', 'agent_session', 'allow_interruptions', 'chat_ctx', 'custom_llm_bridge', 'default', 'dispatch_frontend_rpc', 'instructions', 'latest_transcript_time', 'llm', 'llm_node', 'mcp_servers', 'on_enter', 'on_exit', 'on_llm_response_done', 'on_reply', 'on_transcript', 'on_user_turn_completed', 'page_path', 'participant_data', 'realtime_audio_output_node', 'realtime_llm_session', 'send_ui_action_to_frontend', 'session', 'speak_text', 'stt', 'stt_node', 'tools', 'transcription_node', 'tts', 'tts_node', 'turn_detection', 'update_chat_ctx', 'update_instructions', 'update_tools', 'vad'] [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,549 - [32mINFO[0m __mp_main__ - Successfully registered RPC methods. [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,550 - [32mINFO[0m custom_llm - CustomLLMBridge initialized with RoxAgent reference. Streaming URL: http://localhost:8080/process_interaction_streaming for page: None [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,550 - [32mINFO[0m __mp_main__ - Creating main agent session with VPA pipeline... [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,726 - [32mINFO[0m __mp_main__ - Main agent session created successfully. [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,726 - [32mINFO[0m __mp_main__ - Starting main agent session... [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,728 - [32mINFO[0m __mp_main__ - Main agent session started successfully. [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,728 - [31mERROR[0m __mp_main__ - Failed to update agent metadata to signal readiness: 'LocalParticipant' object has no attribute 'update_metadata' [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,728 - [36mDEBUG[0m livekit.agents - http_session(): creating a new httpclient ctx [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - PARTICIPANT_METADATA: Processing local and remote participants. Room SID: RM_WTwi6g7Fu47K, Name: rox-session-c513e855 [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -   PARTICIPANT_METADATA: Adding local_participant: Identity: agent-AJ_a7dqE99Q7jdG, SID: PA_A5Yvjr386E8H [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -   PARTICIPANT_METADATA: Found 1 remote_participants. Adding them. [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - PARTICIPANT_METADATA: Total participants to process: 2 [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -     PARTICIPANT_METADATA: Processing participant Identity: agent-AJ_a7dqE99Q7jdG, SID: PA_A5Yvjr386E8H [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: No metadata found for participant agent-AJ_a7dqE99Q7jdG (SID: PA_A5Yvjr386E8H) [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -     PARTICIPANT_METADATA: Processing participant Identity: student-1e0d4e85, SID: PA_saeymp9odW7a [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Raw p_obj.metadata for student-1e0d4e85: {"app_role":"student","userToken":"b1a759fc-2417-4bce-bf9f-fae3bf6f4eed","userId":"b1a759fc-2417-4bce-bf9f-fae3bf6f4eed"} [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Parsed metadata_dict for student-1e0d4e85: {'app_role': 'student', 'userToken': 'b1a759fc-2417-4bce-bf9f-fae3bf6f4eed', 'userId': 'b1a759fc-2417-4bce-bf9f-fae3bf6f4eed'} [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m custom_llm - User token added to CustomLLMBridge: b1a759fc-2417-4bce-bf9f-fae3bf6f4eed and user_id: b1a759fc-2417-4bce-bf9f-fae3bf6f4eed [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Found userToken for student-1e0d4e85: b1a759fc-2417-4bce-b... [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Found user_id in metadata for student-1e0d4e85: b1a759fc-2417-4bce-bf9f-fae3bf6f4eed [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Stored data for participant student-1e0d4e85 (SID: PA_saeymp9odW7a) [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - Successfully registered RPC method: rox.interaction.AgentInteraction/HandleFrontendButton [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - Successfully registered RPC method: rox.interaction.AgentInteraction/TestPing [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - Successfully registered RPC method: rox.interaction.AgentInteraction/NotifyPageLoadV2 [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - All RPC interaction services registered successfully. [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - Rox agent fully operational in room 'rox-session-c513e855'. [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - B2F Agent Logic Task for UI testing created. [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,730 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Room 'rox-session-c513e855' is available. [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,731 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Attempting to find target client (Attempt 1/5)... [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,731 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Remote participants: ['student-1e0d4e85'] [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,731 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Found fallback target client: 'student-1e0d4e85' (SID: PA_saeymp9odW7a). [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:16:23,731 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Agent identity is 'agent-AJ_a7dqE99Q7jdG' [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:17:52,856 - [32mINFO[0m livekit.agents - shutting down worker [90m{"id": "AW_YZhMchjoHCXj"}[0m
+2025-06-16 14:17:52,886 - [36mDEBUG[0m livekit.agents - shutting down job task [90m{"reason": "", "user_initiated": false, "pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:17:52,897 - [32mINFO[0m livekit.agents - process exiting [90m{"reason": "", "pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:17:53,037 - [36mDEBUG[0m livekit.agents - http_session(): closing the httpclient ctx [90m{"pid": 70716, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:17:53,527 - [32mINFO[0m livekit.agents - process exiting [90m{"reason": "", "pid": 70711, "inference": true}[0m
+2025-06-16 14:17:58,193 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m[0m
+2025-06-16 14:17:58,263 - [32mINFO[0m livekit.agents - starting worker [90m{"version": "1.0.21", "rtc-version": "1.0.6"}[0m
+2025-06-16 14:17:58,263 - [32mINFO[0m livekit.agents - starting inference executor [90m[0m
+2025-06-16 14:17:58,279 - [35mDEV [0m livekit.agents - reloading job [90m{"job_id": "AJ_a7dqE99Q7jdG", "agent_name": ""}[0m
+2025-06-16 14:17:58,281 - [32mINFO[0m livekit.agents - initializing process [90m{"pid": 70815, "inference": true}[0m
+2025-06-16 14:17:58,290 - [32mINFO[0m livekit.agents - initializing process [90m{"pid": 70816}[0m
+2025-06-16 14:17:59,036 - [36mDEBUG[0m livekit.agents - initializing inference runner [90m{"runner": "lk_end_of_utterance_multilingual", "pid": 70815, "inference": true}[0m
+2025-06-16 14:17:59,050 - [32mINFO[0m livekit.agents - process initialized [90m{"pid": 70816, "elapsed_time": 0.72}[0m
+2025-06-16 14:17:59,049 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m{"pid": 70816}[0m
+2025-06-16 14:17:59,051 - [32mINFO[0m __mp_main__ - Agent identity set to: ai-assistant [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,443 - [32mINFO[0m __mp_main__ - Successfully connected to LiveKit room 'rox-session-c513e855' as 'ai-assistant' [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,444 - [32mINFO[0m __mp_main__ - Runtime Config -- Page: roxpage, TTS: aura-asteria-en, Temp: 0.7, Avatar: False [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,446 - [32mINFO[0m custom_llm - CustomLLMBridge initialized with RoxAgent reference. Streaming URL: http://localhost:8080/process_interaction_streaming for page: None [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,446 - [32mINFO[0m __mp_main__ - RoxAgent.__init__: self (type: <class '__mp_main__.RoxAgent'>) is a JobContext. self._room initially: None [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,446 - [32mINFO[0m __mp_main__ - RoxAgent.__init__ called for page_path: rox-session-c513e855. Attributes: ['HandleFrontendButton', 'NotifyPageLoadV2', 'TestPing', '__class__', '__delattr__', '__dict__', '__dir__', '__doc__', '__eq__', '__firstlineno__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__static_attributes__', '__str__', '__subclasshook__', '__weakref__', '_activity', '_allow_interruptions', '_chat_ctx', '_get_activity_or_raise', '_instructions', '_interaction_service_registered', '_job_ctx', '_latest_session_id', '_latest_student_context', '_llm', '_mcp_servers', '_room', '_send_test_request_to_backend', '_stt', '_tools', '_tts', '_turn_detection', '_vad', 'agent_session', 'allow_interruptions', 'chat_ctx', 'custom_llm_bridge', 'default', 'dispatch_frontend_rpc', 'instructions', 'latest_transcript_time', 'llm', 'llm_node', 'mcp_servers', 'on_enter', 'on_exit', 'on_llm_response_done', 'on_reply', 'on_transcript', 'on_user_turn_completed', 'page_path', 'participant_data', 'realtime_audio_output_node', 'realtime_llm_session', 'send_ui_action_to_frontend', 'session', 'speak_text', 'stt', 'stt_node', 'tools', 'transcription_node', 'tts', 'tts_node', 'turn_detection', 'update_chat_ctx', 'update_instructions', 'update_tools', 'vad'] [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,446 - [32mINFO[0m __mp_main__ - RPC methods are now part of RoxAgent. Skipping explicit service registration. [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,446 - [32mINFO[0m custom_llm - CustomLLMBridge initialized with RoxAgent reference. Streaming URL: http://localhost:8080/process_interaction_streaming for page: None [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,446 - [32mINFO[0m __mp_main__ - Creating main agent session with VPA pipeline... [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,708 - [32mINFO[0m __mp_main__ - Main agent session created successfully. [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,708 - [32mINFO[0m __mp_main__ - Starting main agent session... [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,712 - [32mINFO[0m __mp_main__ - Main agent session started successfully. [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,713 - [36mDEBUG[0m livekit.agents - http_session(): creating a new httpclient ctx [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ - PARTICIPANT_METADATA: Processing local and remote participants. Room SID: RM_WTwi6g7Fu47K, Name: rox-session-c513e855 [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ -   PARTICIPANT_METADATA: Adding local_participant: Identity: agent-AJ_a7dqE99Q7jdG, SID: PA_BMX6pBTicq4K [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ -   PARTICIPANT_METADATA: Found 1 remote_participants. Adding them. [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ - PARTICIPANT_METADATA: Total participants to process: 2 [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ -     PARTICIPANT_METADATA: Processing participant Identity: agent-AJ_a7dqE99Q7jdG, SID: PA_BMX6pBTicq4K [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: No metadata found for participant agent-AJ_a7dqE99Q7jdG (SID: PA_BMX6pBTicq4K) [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ -     PARTICIPANT_METADATA: Processing participant Identity: student-1e0d4e85, SID: PA_saeymp9odW7a [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Raw p_obj.metadata for student-1e0d4e85: {"app_role":"student","userToken":"b1a759fc-2417-4bce-bf9f-fae3bf6f4eed","userId":"b1a759fc-2417-4bce-bf9f-fae3bf6f4eed"} [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,714 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Parsed metadata_dict for student-1e0d4e85: {'app_role': 'student', 'userToken': 'b1a759fc-2417-4bce-bf9f-fae3bf6f4eed', 'userId': 'b1a759fc-2417-4bce-bf9f-fae3bf6f4eed'} [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m custom_llm - User token added to CustomLLMBridge: b1a759fc-2417-4bce-bf9f-fae3bf6f4eed and user_id: b1a759fc-2417-4bce-bf9f-fae3bf6f4eed [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Found userToken for student-1e0d4e85: b1a759fc-2417-4bce-b... [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Found user_id in metadata for student-1e0d4e85: b1a759fc-2417-4bce-bf9f-fae3bf6f4eed [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ -       PARTICIPANT_METADATA: Stored data for participant student-1e0d4e85 (SID: PA_saeymp9odW7a) [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ - Successfully registered RPC method: rox.interaction.AgentInteraction/HandleFrontendButton [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ - Successfully registered RPC method: rox.interaction.AgentInteraction/TestPing [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ - Successfully registered RPC method: rox.interaction.AgentInteraction/NotifyPageLoadV2 [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ - All RPC interaction services registered successfully. [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ - Rox agent fully operational in room 'rox-session-c513e855'. [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,715 - [32mINFO[0m __mp_main__ - B2F Agent Logic Task for UI testing created. [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,716 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Room 'rox-session-c513e855' is available. [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,716 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Attempting to find target client (Attempt 1/5)... [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,717 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Remote participants: ['student-1e0d4e85'] [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,717 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Found fallback target client: 'student-1e0d4e85' (SID: PA_saeymp9odW7a). [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:00,717 - [32mINFO[0m __mp_main__ - B2F Agent Logic: Agent identity is 'agent-AJ_a7dqE99Q7jdG' [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:03,067 - [36mDEBUG[0m livekit.agents - inference runner initialized [90m{"runner": "lk_end_of_utterance_multilingual", "elapsed_time": 4.030106791993603, "pid": 70815, "inference": true}[0m
+2025-06-16 14:18:03,099 - [32mINFO[0m livekit.agents - process initialized [90m{"pid": 70815, "inference": true, "elapsed_time": 4.82}[0m
+2025-06-16 14:18:03,094 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m{"pid": 70815, "inference": true}[0m
+2025-06-16 14:18:03,124 - [32mINFO[0m livekit.agents - [1msee tracing information at http://localhost:60184/debug[0m [90m[0m
+2025-06-16 14:18:03,456 - [32mINFO[0m livekit.agents - registered worker [90m{"id": "AW_ESzy6hSRHUox", "url": "wss://shodhai-pojmjchi.livekit.cloud", "region": "India", "protocol": 16}[0m
+2025-06-16 14:18:31,367 - [32mINFO[0m livekit.agents - shutting down worker [90m{"id": "AW_ESzy6hSRHUox"}[0m
+2025-06-16 14:18:31,402 - [32mINFO[0m livekit.agents - process exiting [90m{"reason": "", "pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:31,390 - [36mDEBUG[0m livekit.agents - shutting down job task [90m{"reason": "", "user_initiated": false, "pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:31,509 - [36mDEBUG[0m livekit.agents - http_session(): closing the httpclient ctx [90m{"pid": 70816, "job_id": "AJ_a7dqE99Q7jdG"}[0m
+2025-06-16 14:18:31,994 - [32mINFO[0m livekit.agents - process exiting [90m{"reason": "", "pid": 70815, "inference": true}[0m

@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Import LiveKit components
 from livekit import agents
 from livekit.agents import Agent, JobContext, RoomInputOptions, WorkerOptions
+from livekit.rtc.rpc import RpcInvocationData
 from livekit.agents.llm import (
     LLM,
     ChatContext,
@@ -84,16 +85,6 @@ try:
 except ImportError:
     logger.error(
         "Failed to import CustomLLMBridge. Make sure custom_llm.py exists in the 'rox' directory and aiohttp is installed."
-    )
-    sys.exit(1)
-
-# Import RPC service implementation
-try:
-    from rpc_services import AgentInteractionService
-except ImportError as e:
-    logger.error(
-        f"Failed to import AgentInteractionService from rpc_services.py. Error: {e}",
-        exc_info=True,
     )
     sys.exit(1)
 
@@ -186,7 +177,8 @@ class RoxAgent(Agent):
 
     async def send_ui_action_to_frontend(
         self,
-        action_data: dict,
+        action_type: interaction_pb2.ClientUIActionType,
+        action_payload: Dict[str, Any],
         target_identity: Optional[str] = None,
         job_ctx_override: Optional[JobContext] = None,
     ):
@@ -213,9 +205,9 @@ class RoxAgent(Agent):
 
             # Find target identity if not provided
             final_target_identity = target_identity
-            if not final_target_identity and self._room and self._room.participants:
+            if not final_target_identity and self._room and self._room.remote_participants:
                 # Use first remote participant as fallback target
-                for p_identity in self._room.participants.keys():
+                for p_identity in self._room.remote_participants.keys():
                     if p_identity != self._room.local_participant.identity:
                         final_target_identity = p_identity
                         break
@@ -226,32 +218,30 @@ class RoxAgent(Agent):
                 )
                 return
 
-            # Accept either "type" or "action_type_str" to determine the action type
-            action_type = action_data.get("type") or action_data.get("action_type_str")
-            parameters = action_data.get("parameters", {})
+            request_id = str(uuid.uuid4())
 
-            if action_type == "SHOW_ALERT" or action_type == "alert":
+            if action_type == interaction_pb2.ClientUIActionType.SHOW_ALERT:
                 logger.info(
                     f"Preparing to send UI action 'SHOW_ALERT' to identity '{final_target_identity}' via room data channel."
                 )
 
                 # Extract alert parameters from either direct keys or from the parameters dict
-                alert_title = action_data.get("title", "")
-                alert_message = action_data.get("message", "")
-                alert_buttons = action_data.get("buttons", [])
+                alert_title = action_payload.get("title", "")
+                alert_message = action_payload.get("message", "")
+                alert_buttons = action_payload.get("buttons", [])
 
                 # If not found in top-level, check in parameters
-                if not alert_title and "title" in parameters:
-                    alert_title = parameters.get("title", "")
-                if not alert_message and "message" in parameters:
-                    alert_message = parameters.get("message", "")
-                if not alert_buttons and "buttons" in parameters:
-                    alert_buttons = parameters.get("buttons", [])
+                if not alert_title and "title" in action_payload:
+                    alert_title = action_payload.get("title", "")
+                if not alert_message and "message" in action_payload:
+                    alert_message = action_payload.get("message", "")
+                if not alert_buttons and "buttons" in action_payload:
+                    alert_buttons = action_payload.get("buttons", [])
 
                 # Create a simple JSON structure to send via data channel
                 json_payload = {
                     "type": "agent_ui_action",
-                    "request_id": action_data.get("request_id", str(uuid.uuid4())),
+                    "request_id": request_id,
                     "method_name": "HandleAgentUIAction",
                     "action_type": "SHOW_ALERT",
                     "alert_title": alert_title,
@@ -431,6 +421,174 @@ class RoxAgent(Agent):
         logger.info(
             f"Processed {processed_actions_count} UI actions from LLM tool_calls."
         )
+
+    async def HandleFrontendButton(self, raw_payload: RpcInvocationData) -> str:
+        logger.info("[RPC DEBUG] HandleFrontendButton method invoked by frontend (via RpcInvocationData).")
+        try:
+            # Guard clause to ensure context is loaded before processing.
+            if not self._latest_session_id or not self._latest_student_context:
+                logger.error("RPC HandleFrontendButton: Cannot process button click. Agent context (session_id, user_id) is missing. Was NotifyPageLoadV2 called?")
+                await self.send_ui_action_to_frontend(
+                    interaction_pb2.ClientUIActionType.SHOW_ALERT,
+                    {'message': 'Error: Agent is not ready. Please reload the page.'}
+                )
+                error_response_pb = interaction_pb2.AgentResponse(status_message="Agent not initialized with page context.")
+                return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')
+
+            base64_decoded_payload = base64.b64decode(raw_payload.payload)
+            request = interaction_pb2.FrontendButtonClickRequest()
+            request.ParseFromString(base64_decoded_payload)
+            logger.info(f"RPC HandleFrontendButton: Decoded request: button_id='{request.button_id}', custom_data='{request.custom_data}'")
+            logger.info(f"RPC HandleFrontendButton: Caller identity: {raw_payload.caller_identity}")
+
+            button_id = request.button_id
+            custom_data_str = request.custom_data
+
+            if button_id == "test_rpc_button":
+                logger.info("RPC HandleFrontendButton: 'test_rpc_button' clicked. Preparing to call LangGraph backend...")
+                await self.update_chat_ctx(ChatContext([ChatMessage(role="user", content=["The user clicked the test button."])]))
+                await self._send_test_request_to_backend()
+                await self.send_ui_action_to_frontend(
+                    interaction_pb2.ClientUIActionType.SHOW_ALERT,
+                    {'message': 'Request sent to LangGraph service!'}
+                )
+            else:
+                logger.warning(f"RPC HandleFrontendButton: Unhandled button_id: {button_id}")
+                await self.send_ui_action_to_frontend(
+                    interaction_pb2.ClientUIActionType.SHOW_ALERT,
+                    {'message': f'Button {button_id} clicked, but no action is defined.'}
+                )
+
+            response_pb = interaction_pb2.AgentResponse(status_message=f"Action for button '{button_id}' processed.")
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+
+        except Exception as e_main:
+            logger.error(f"RPC HandleFrontendButton: An error occurred: {e_main}", exc_info=True)
+            error_response_pb = interaction_pb2.AgentResponse(status_message=f"Error processing request: {e_main}")
+            return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')
+
+    async def _send_test_request_to_backend(self) -> None:
+        """Send a request to the backend API and handle the streaming response."""
+        logger.info("!!!!!! DEBUG: _send_test_request_to_backend ENTERED !!!!!!")
+        import aiohttp
+        import os
+        import json
+        import uuid
+
+        base_backend_url = os.environ.get("MY_CUSTOM_AGENT_URL", "http://localhost:8001/process_interaction")
+        if "/process_interaction_streaming" not in base_backend_url:
+            streaming_backend_url = base_backend_url.replace("/process_interaction", "/process_interaction_streaming")
+        else:
+            streaming_backend_url = base_backend_url
+
+        try:
+            logger.info(f"Sending request to backend streaming API at {streaming_backend_url}")
+
+            payload = {
+                "task_stage": "unknown_via_rpc_stream_request",
+                "session_id": self._latest_session_id,
+                "current_context": {
+                    "user_id": self._latest_student_context
+                },
+                "chat_history": []
+            }
+            logger.debug(f"Request payload for streaming: {json.dumps(payload, indent=2)}")
+
+            async with aiohttp.ClientSession() as http_session:
+                async with http_session.post(streaming_backend_url, json=payload) as response:
+                    logger.info(f"Backend API response status: {response.status}")
+                    if response.status == 200 and 'text/event-stream' in response.headers.get('Content-Type', ''):
+                        logger.info("Backend response is a stream. Parsing SSE...")
+                        current_event_name = None
+                        current_event_data_lines = []
+
+                        async for line_bytes in response.content:
+                            line = line_bytes.decode('utf-8').strip()
+
+                            if line.startswith('event:'):
+                                current_event_name = line[len('event:'):].strip()
+                            elif line.startswith('data:'):
+                                current_event_data_lines.append(line[len('data:'):].strip())
+                            elif not line:
+                                if current_event_name and current_event_data_lines:
+                                    data_str = "\n".join(current_event_data_lines)
+                                    logger.debug(f"SSE: Received event '{current_event_name}' with data: {data_str[:200]}...")
+                                    
+                                    try:
+                                        data_json = json.loads(data_str)
+
+                                        if current_event_name == "streaming_text_chunk":
+                                            text_to_speak = data_json.get('streaming_text_chunk')
+                                            if text_to_speak and hasattr(self, 'speak_text'):
+                                                logger.info(f"SSE: Speaking text from 'streaming_text_chunk': {text_to_speak[:100]}...")
+                                                await self.speak_text(text_to_speak)
+                                        elif current_event_name == "final_ui_actions":
+                                            ui_actions = data_json.get('ui_actions', [])
+                                            if ui_actions:
+                                                logger.info(f"SSE: Received 'final_ui_actions' with {len(ui_actions)} actions.")
+                                                for action in ui_actions:
+                                                    action_type = action.get('action')
+                                                    action_payload = action.get('payload')
+                                                    request_id = str(uuid.uuid4())
+                                                    await self.send_ui_action_to_frontend(action_type, action_payload, request_id)
+                                    except json.JSONDecodeError:
+                                        logger.error(f"SSE: Failed to decode JSON from data: {data_str}")
+
+                                current_event_name = None
+                                current_event_data_lines = []
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Backend API request failed: {response.status} - {error_text}")
+                        await self.send_ui_action_to_frontend(
+                            interaction_pb2.ClientUIActionType.SHOW_ALERT,
+                            {'message': f"Backend Error: {response.status}"}
+                        )
+
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP Client Error sending request to backend: {e}", exc_info=True)
+            await self.send_ui_action_to_frontend(
+                interaction_pb2.ClientUIActionType.SHOW_ALERT,
+                {'message': f"Error communicating with backend: {e}"}
+            )
+
+    async def NotifyPageLoadV2(self, raw_payload: RpcInvocationData) -> str:
+        logger.info("[RPC DEBUG] NotifyPageLoadV2 method invoked by frontend.")
+        try:
+            base64_decoded_payload = base64.b64decode(raw_payload.payload)
+            request = interaction_pb2.NotifyPageLoadRequest()
+            request.ParseFromString(base64_decoded_payload)
+            logger.info(f"RPC NotifyPageLoadV2: Decoded request: current_page='{request.current_page}', session_id='{request.session_id}', user_id='{request.user_id}'")
+
+            self._latest_session_id = request.session_id
+            self._latest_student_context = request.user_id
+
+            logger.info(f"RPC NotifyPageLoadV2: Updated agent context with session_id and student_context.")
+            
+            response_data = {
+                "status": "success",
+                "message": "Page load notified.",
+                "session_id": self._latest_session_id
+            }
+            json_response_str = json.dumps(response_data)
+            base64_response_str = base64.b64encode(json_response_str.encode('utf-8')).decode('utf-8')
+            return base64_response_str
+
+        except Exception as e:
+            logger.error(f"RPC NotifyPageLoadV2: Error processing request: {e}", exc_info=True)
+            error_response_data = {"status": "error", "message": str(e)}
+            json_error_str = json.dumps(error_response_data)
+            return base64.b64encode(json_error_str.encode('utf-8')).decode('utf-8')
+
+    async def TestPing(self, raw_payload: RpcInvocationData) -> str:
+        logger.info(f"[RPC DEBUG] TestPing method invoked by {raw_payload.caller_identity} (expecting Empty payload).")
+        try:
+            logger.info(f"RPC TestPing: Received ping from: {raw_payload.caller_identity}. Payload type should be Empty.")
+            response_pb = interaction_pb2.AgentResponse(status_message="Pong! TestPing successful.")
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+        except Exception as e:
+            logger.error(f"RPC TestPing: Error: {e}", exc_info=True)
+            error_response_pb = interaction_pb2.AgentResponse(status_message=f"Error in TestPing: {str(e)}")
+            return base64.b64encode(error_response_pb.SerializeToString()).decode('utf-8')
 
 
 async def trigger_client_ui_action(
@@ -726,7 +884,7 @@ async def entrypoint(ctx: JobContext):
     if GLOBAL_AVATAR_ENABLED:
         ctx.identity = "rox-tavus-avatar-agent"
     else:
-        ctx.identity = "rox-custom-llm-agent"
+        ctx.identity = "ai-assistant"
     logger.info(f"Agent identity set to: {ctx.identity}")
 
     try:
@@ -744,6 +902,10 @@ async def entrypoint(ctx: JobContext):
 
     rox_agent_instance = RoxAgent(job_ctx=ctx, page_path=ctx.room.name)
     rox_agent_instance._room = ctx.room  # Explicitly set agent's room reference
+
+    # The RPC methods (HandleFrontendButton, etc.) are now part of the RoxAgent class.
+    # The framework should automatically expose them. No explicit registration is needed.
+    logger.info("RPC methods are now part of RoxAgent. Skipping explicit service registration.")
 
     avatar_session = None
     if GLOBAL_AVATAR_ENABLED and tavus_module:
@@ -895,23 +1057,59 @@ async def entrypoint(ctx: JobContext):
 
         # Instantiate the RPC service, passing the agent instance
 
-        agent_rpc_service = AgentInteractionService(agent_instance=rox_agent_instance)
-        try:
-            if ctx.room and ctx.room.local_participant:
-                ctx.room.local_participant.register_rpc_method(
-                    "rox.interaction.AgentInteraction/HandleFrontendButton",
-                    agent_rpc_service.HandleFrontendButton,
-                )
-                logger.info(
-                    "Successfully registered RPC handler for HandleFrontendButton."
-                )
-                rox_agent_instance._interaction_service_registered = True
+        # The AgentInteractionService is no longer used. RPC methods are now part of RoxAgent.
+
+        # Register RPC handlers
+        # Ensure ctx.room and ctx.room.local_participant are available
+        if ctx.room and ctx.room.local_participant:
+            local_participant = ctx.room.local_participant
+            all_registered_successfully = True # Flag to track success
+
+            # Define method names based on the proto service definition
+            method_name_button = "rox.interaction.AgentInteraction/HandleFrontendButton"
+            method_name_ping = "rox.interaction.AgentInteraction/TestPing"
+            method_name_notify_v2 = "rox.interaction.AgentInteraction/NotifyPageLoadV2"
+            
+            # Register the methods from the rox_agent_instance
+            try:
+                local_participant.register_rpc_method(method_name_button, rox_agent_instance.HandleFrontendButton)
+                logger.info(f"Successfully registered RPC method: {method_name_button}")
+            except Exception as e:
+                if "already registered" in str(e).lower():
+                    logger.info(f"RPC method {method_name_button} already registered.")
+                else:
+                    logger.error(f"Failed to register RPC method {method_name_button}: {e}", exc_info=True)
+                    all_registered_successfully = False
+
+            try:
+                local_participant.register_rpc_method(method_name_ping, rox_agent_instance.TestPing)
+                logger.info(f"Successfully registered RPC method: {method_name_ping}")
+            except Exception as e:
+                if "already registered" in str(e).lower():
+                    logger.info(f"RPC method {method_name_ping} already registered.")
+                else:
+                    logger.error(f"Failed to register RPC method {method_name_ping}: {e}", exc_info=True)
+                    all_registered_successfully = False
+
+            try:
+                local_participant.register_rpc_method(method_name_notify_v2, rox_agent_instance.NotifyPageLoadV2)
+                logger.info(f"Successfully registered RPC method: {method_name_notify_v2}")
+            except Exception as e:
+                if "already registered" in str(e).lower():
+                    logger.info(f"RPC method {method_name_notify_v2} already registered.")
+                else:
+                    logger.error(f"Failed to register RPC method {method_name_notify_v2}: {e}", exc_info=True)
+                    all_registered_successfully = False
+
+            if not all_registered_successfully:
+                logger.warning("One or more RPC interaction services failed to register.")
             else:
-                logger.error(
-                    "Cannot register RPC handler: room or local_participant not available."
-                )
-        except Exception as e_rpc_reg:
-            logger.error(f"Failed to register RPC handler: {e_rpc_reg}", exc_info=True)
+                # This flag is part of RoxAgent's design, let's try to set it if all goes well.
+                if hasattr(rox_agent_instance, '_interaction_service_registered'):
+                    rox_agent_instance._interaction_service_registered = True
+                logger.info("All RPC interaction services registered successfully.")
+        else:
+            logger.error("Could not register RPC methods: JobContext's Room or LocalParticipant not available at registration time.")
 
         logger.info(f"Rox agent fully operational in room '{ctx.room.name}'.")
 

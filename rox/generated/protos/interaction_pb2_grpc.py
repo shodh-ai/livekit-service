@@ -3,9 +3,11 @@
 import grpc
 import warnings
 
+from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
+from google.protobuf import wrappers_pb2 as google_dot_protobuf_dot_wrappers__pb2
 import interaction_pb2 as interaction__pb2
 
-GRPC_GENERATED_VERSION = '1.71.0'
+GRPC_GENERATED_VERSION = '1.73.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -37,13 +39,23 @@ class AgentInteractionStub(object):
         """
         self.HandleFrontendButton = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/HandleFrontendButton',
-                request_serializer=interaction__pb2.FrontendButtonClickRequest.SerializeToString,
-                response_deserializer=interaction__pb2.AgentResponse.FromString,
+                request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
+                response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
                 _registered_method=True)
         self.NotifyPageLoad = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/NotifyPageLoad',
                 request_serializer=interaction__pb2.NotifyPageLoadRequest.SerializeToString,
                 response_deserializer=interaction__pb2.AgentResponse.FromString,
+                _registered_method=True)
+        self.NotifyPageLoadV2 = channel.unary_unary(
+                '/rox.interaction.AgentInteraction/NotifyPageLoadV2',
+                request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
+                response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
+                _registered_method=True)
+        self.TestPing = channel.unary_unary(
+                '/rox.interaction.AgentInteraction/TestPing',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
                 _registered_method=True)
 
 
@@ -52,13 +64,28 @@ class AgentInteractionServicer(object):
     """
 
     def HandleFrontendButton(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """Changed to accept RpcInvocationData and return StringValue (base64 encoded AgentResponse)
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def NotifyPageLoad(self, request, context):
-        """Agent acknowledges page load
+        """Old one, kept for reference or if used elsewhere. Remove if V2 fully replaces it.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def NotifyPageLoadV2(self, request, context):
+        """Method frontend is calling, signature aligned with Python service style
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def TestPing(self, request, context):
+        """TestPing method
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -69,13 +96,23 @@ def add_AgentInteractionServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'HandleFrontendButton': grpc.unary_unary_rpc_method_handler(
                     servicer.HandleFrontendButton,
-                    request_deserializer=interaction__pb2.FrontendButtonClickRequest.FromString,
-                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
+                    request_deserializer=interaction__pb2.RpcInvocationData.FromString,
+                    response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
             ),
             'NotifyPageLoad': grpc.unary_unary_rpc_method_handler(
                     servicer.NotifyPageLoad,
                     request_deserializer=interaction__pb2.NotifyPageLoadRequest.FromString,
                     response_serializer=interaction__pb2.AgentResponse.SerializeToString,
+            ),
+            'NotifyPageLoadV2': grpc.unary_unary_rpc_method_handler(
+                    servicer.NotifyPageLoadV2,
+                    request_deserializer=interaction__pb2.RpcInvocationData.FromString,
+                    response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
+            ),
+            'TestPing': grpc.unary_unary_rpc_method_handler(
+                    servicer.TestPing,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -104,8 +141,8 @@ class AgentInteraction(object):
             request,
             target,
             '/rox.interaction.AgentInteraction/HandleFrontendButton',
-            interaction__pb2.FrontendButtonClickRequest.SerializeToString,
-            interaction__pb2.AgentResponse.FromString,
+            interaction__pb2.RpcInvocationData.SerializeToString,
+            google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
             options,
             channel_credentials,
             insecure,
@@ -133,6 +170,60 @@ class AgentInteraction(object):
             '/rox.interaction.AgentInteraction/NotifyPageLoad',
             interaction__pb2.NotifyPageLoadRequest.SerializeToString,
             interaction__pb2.AgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def NotifyPageLoadV2(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/rox.interaction.AgentInteraction/NotifyPageLoadV2',
+            interaction__pb2.RpcInvocationData.SerializeToString,
+            google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def TestPing(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/rox.interaction.AgentInteraction/TestPing',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
             options,
             channel_credentials,
             insecure,
