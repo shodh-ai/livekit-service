@@ -1,8 +1,11 @@
+from google.protobuf import empty_pb2 as _empty_pb2
+from google.protobuf import wrappers_pb2 as _wrappers_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -138,6 +141,24 @@ class NotifyPageLoadRequest(_message.Message):
     chat_history: str
     transcript: str
     def __init__(self, task_stage: _Optional[str] = ..., user_id: _Optional[str] = ..., current_page: _Optional[str] = ..., session_id: _Optional[str] = ..., chat_history: _Optional[str] = ..., transcript: _Optional[str] = ...) -> None: ...
+
+class RpcInvocationData(_message.Message):
+    __slots__ = ("caller_identity", "payload", "request_id")
+    CALLER_IDENTITY_FIELD_NUMBER: _ClassVar[int]
+    PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    caller_identity: str
+    payload: str
+    request_id: str
+    def __init__(self, caller_identity: _Optional[str] = ..., payload: _Optional[str] = ..., request_id: _Optional[str] = ...) -> None: ...
+
+class InvokeAgentTaskRequest(_message.Message):
+    __slots__ = ("task_name", "json_payload")
+    TASK_NAME_FIELD_NUMBER: _ClassVar[int]
+    JSON_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    task_name: str
+    json_payload: str
+    def __init__(self, task_name: _Optional[str] = ..., json_payload: _Optional[str] = ...) -> None: ...
 
 class HighlightRangeProto(_message.Message):
     __slots__ = ("id", "start", "end", "type", "message", "wrong_version", "correct_version")

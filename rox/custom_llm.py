@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Get the URL of your custom backend agent from environment variables
 MY_CUSTOM_AGENT_URL = os.getenv("MY_CUSTOM_AGENT_URL", "http://localhost:8080/process_interaction") # Default non-streaming URL
 MY_FASTAPI_URL_STREAMING = os.getenv("MY_CUSTOM_AGENT_URL_STREAMING", "http://localhost:8080/process_interaction_streaming") # New Streaming URL
+MY_LANGGRAPH_TASK_URL = os.getenv("MY_LANGGRAPH_TASK_URL", "http://localhost:8080/invoke_task_streaming")
 
 class CustomLLMBridge(LLM):
     """
@@ -41,6 +42,8 @@ class CustomLLMBridge(LLM):
             logger.info(f"CustomLLMBridge initialized with RoxAgent reference. Streaming URL: {self._streaming_agent_url} for page: {self._page_name}")
         else:
             logger.warning(f"CustomLLMBridge initialized WITHOUT RoxAgent reference. Context data will not be available. Streaming URL: {self._streaming_agent_url} for page: {self._page_name}")
+        self._task_url = MY_LANGGRAPH_TASK_URL # Add this
+        logger.info(f"LangGraph task streaming URL: {self._task_url}")
 
     def add_user_token(self, user_token: str, user_id: str):
         self._user_token = user_token
@@ -49,6 +52,57 @@ class CustomLLMBridge(LLM):
 
     def chat(self, *, chat_ctx: ChatContext = None, tools = None, tool_choice = None):
         return self._chat_context_manager(chat_ctx, tools, tool_choice)
+
+    async def invoke_task_streaming(self, task_name: str, json_payload_str: str) -> AsyncIterable[tuple[str, Any]]:
+        """
+        Calls the generic LangGraph task endpoint and streams back events.
+        """
+        payload = {
+            "task_name": task_name,
+            "json_payload": json_payload_str,
+            # Include agent context if available
+            "agent_context": self._rox_agent_ref._latest_student_context if self._rox_agent_ref else {}
+        }
+        
+        logger.info(f"Invoking LangGraph task '{task_name}' at {self._task_url}")
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                async with client.stream("POST", self._task_url, json=payload) as response:
+                    response.raise_for_status()
+                    
+                    current_event_type = None
+                    current_event_data_lines = []
+
+                    async for line_bytes in response.aiter_bytes():
+                        line = line_bytes.decode('utf-8').strip()
+
+                        if line.startswith("event:"):
+                            current_event_type = line.split(":", 1)[1].strip()
+                            current_event_data_lines = [] # Reset for new event data
+                        elif line.startswith("data:"):
+                            current_event_data_lines.append(line.split(":", 1)[1].strip())
+                        elif not line and current_event_type:
+                            # End of event, process it
+                            data_str = "".join(current_event_data_lines)
+                            try:
+                                data_obj = json.loads(data_str)
+                                yield (current_event_type, data_obj)
+                            except json.JSONDecodeError:
+                                # If data is not JSON, yield as raw string
+                                yield (current_event_type, data_str)
+                            
+                            # Reset for next event
+                            current_event_type = None
+                            current_event_data_lines = []
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error calling LangGraph task endpoint: {e.response.status_code} - {e.response.text}")
+            yield ("error", {"message": f"Backend Error: {e.response.status_code}"})
+        except Exception as e:
+            logger.error(f"Error in invoke_task_streaming: {e}", exc_info=True)
+            yield ("error", {"message": "An unexpected error occurred while contacting the backend."})
+
 
     async def _call_fastapi_streaming_sse(self, fastapi_payload: dict, tts_pusher_function) -> Optional[List[Dict[str, Any]]]:
         """
