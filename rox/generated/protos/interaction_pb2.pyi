@@ -152,6 +152,14 @@ class RpcInvocationData(_message.Message):
     request_id: str
     def __init__(self, caller_identity: _Optional[str] = ..., payload: _Optional[str] = ..., request_id: _Optional[str] = ...) -> None: ...
 
+class InvokeAgentTaskRequest(_message.Message):
+    __slots__ = ("task_name", "json_payload")
+    TASK_NAME_FIELD_NUMBER: _ClassVar[int]
+    JSON_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    task_name: str
+    json_payload: str
+    def __init__(self, task_name: _Optional[str] = ..., json_payload: _Optional[str] = ...) -> None: ...
+
 class HighlightRangeProto(_message.Message):
     __slots__ = ("id", "start", "end", "type", "message", "wrong_version", "correct_version")
     ID_FIELD_NUMBER: _ClassVar[int]

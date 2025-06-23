@@ -37,6 +37,11 @@ class AgentInteractionStub(object):
         Args:
             channel: A grpc.Channel.
         """
+        self.InvokeAgentTask = channel.unary_unary(
+                '/rox.interaction.AgentInteraction/InvokeAgentTask',
+                request_serializer=interaction__pb2.InvokeAgentTaskRequest.SerializeToString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
+                _registered_method=True)
         self.HandleFrontendButton = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/HandleFrontendButton',
                 request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
@@ -62,6 +67,13 @@ class AgentInteractionStub(object):
 class AgentInteractionServicer(object):
     """Service the agent will implement (called by frontend)
     """
+
+    def InvokeAgentTask(self, request, context):
+        """+++ ADD THIS NEW UNIVERSAL RPC +++
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
     def HandleFrontendButton(self, request, context):
         """Changed to accept RpcInvocationData and return StringValue (base64 encoded AgentResponse)
@@ -94,6 +106,11 @@ class AgentInteractionServicer(object):
 
 def add_AgentInteractionServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'InvokeAgentTask': grpc.unary_unary_rpc_method_handler(
+                    servicer.InvokeAgentTask,
+                    request_deserializer=interaction__pb2.InvokeAgentTaskRequest.FromString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
+            ),
             'HandleFrontendButton': grpc.unary_unary_rpc_method_handler(
                     servicer.HandleFrontendButton,
                     request_deserializer=interaction__pb2.RpcInvocationData.FromString,
@@ -125,6 +142,33 @@ def add_AgentInteractionServicer_to_server(servicer, server):
 class AgentInteraction(object):
     """Service the agent will implement (called by frontend)
     """
+
+    @staticmethod
+    def InvokeAgentTask(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/rox.interaction.AgentInteraction/InvokeAgentTask',
+            interaction__pb2.InvokeAgentTaskRequest.SerializeToString,
+            interaction__pb2.AgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
 
     @staticmethod
     def HandleFrontendButton(request,
