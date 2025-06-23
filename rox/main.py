@@ -12,6 +12,7 @@ import json
 import uuid
 import base64
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 from livekit.plugins import noise_cancellation
 from livekit.plugins import deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
@@ -93,7 +94,7 @@ async def trigger_client_ui_action(
 
 
 class RoxAgent(Agent):
-    """Rox AI assistant with UI interaction capabilities."""
+    """Rox AI assistant with UI interaction capabilities.""" 
     def __init__(self, **kwargs):
         # Set default instructions if not provided, to satisfy Agent base class
         kwargs.setdefault(
@@ -104,86 +105,91 @@ class RoxAgent(Agent):
         self.agent_session: Optional[agents.AgentSession] = None
         self._room: Optional[rtc.Room] = None
         self._job_ctx: Optional[JobContext] = None
+        # +++ ADD A TASK QUEUE +++
+        self.task_queue: asyncio.Queue[tuple] = asyncio.Queue()
 
     async def speak_text(self, text: str):
-        if not self.agent_session or not text:
-            return
-        try:
-            logger.info(f"Agent speaking: {text[:80]}...")
-            await self.agent_session.say(text, add_to_chat_ctx=False)
-        except Exception as e:
-            logger.error(f"Error in speak_text: {e}", exc_info=True)
+        if self.agent_session:
+            logger.info(f"Attempting to speak text: '{text[:50]}...' via AgentSession TTS.")
+            try:
+                await self.agent_session.say(text, allow_interruptions=True)
+                logger.info(f"Successfully completed TTS call for text: '{text[:50]}...'")
+            except Exception as e:
+                logger.error(f"Error during agent_session.say(): {e}", exc_info=True)
+        else:
+            logger.warning("Agent session not available, cannot speak text.")
 
-    # +++ NEW GENERIC TASK TRIGGER WITH CORRECTED SSE LOOP +++
     async def trigger_langgraph_task(self, task_name: str, json_payload: str, caller_identity: str):
-        """
-        A generic method to send any task to the LangGraph backend and stream the response
-        back to the client. THIS IS THE NEW, CORRECT SSE CONSUMER.
-        """
-        logger.info(f"Agent triggering LangGraph task: '{task_name}' for user '{caller_identity}'.")
-        
-        try:
-            langgraph_url = os.getenv("MY_CUSTOM_AGENT_URL")
-            if not langgraph_url:
-                raise ValueError("MY_CUSTOM_AGENT_URL is not set in environment.")
+        """Puts a new task onto the agent's processing queue."""
+        logger.info(f"Queueing LangGraph task: '{task_name}' for user '{caller_identity}'.")
+        await self.task_queue.put((task_name, json_payload, caller_identity))
+
+    async def processing_loop(self):
+        """The main loop that waits for tasks and processes them safely."""
+        logger.info("Agent's main processing loop started.")
+        while True:
+            try:
+                task_name, json_payload, caller_identity = await self.task_queue.get()
                 
-            streaming_endpoint = langgraph_url.replace("/process_interaction", "/invoke_task_streaming")
-            
-            request_body = {
-                "task_name": task_name,
-                "json_payload": json_payload  # Pass the payload as a JSON string
-            }
+                logger.info(f"Dequeued task: '{task_name}'. Processing...")
 
-            async with aiohttp.ClientSession() as http_session:
-                async with http_session.post(streaming_endpoint, json=request_body) as response:
-                    if response.status != 200:
-                        err_text = await response.text()
-                        logger.error(f"LangGraph returned an error: {response.status} - {err_text}")
-                        return
+                langgraph_url = os.getenv("MY_CUSTOM_AGENT_URL")
+                if not langgraph_url:
+                    logger.error("MY_CUSTOM_AGENT_URL is not set. Cannot contact LangGraph.")
+                    continue
 
-                    logger.info("Connection to LangGraph established. Parsing SSE stream...")
-                    current_event_name = None
-                    current_event_data_lines = []
-                    async for line_bytes in response.content:
-                        line = line_bytes.decode('utf-8').strip()
-                        if line.startswith('event:'):
-                            current_event_name = line[len('event:'):].strip()
-                        elif line.startswith('data:'):
-                            current_event_data_lines.append(line[len('data:'):].strip())
-                        elif not line and current_event_name:
-                            data_str = "\n".join(current_event_data_lines)
-                            data_json = json.loads(data_str)
+                # Correctly construct the URL by replacing the path
+                parsed_url = urlparse(langgraph_url)
+                new_path = "/invoke_task_streaming"
+                endpoint = urlunparse(parsed_url._replace(path=new_path))
+                request_body = {"task_name": task_name, "json_payload": json_payload}
+                
+                async with aiohttp.ClientSession() as http_session:
+                    async with http_session.post(endpoint, json=request_body) as response:
+                        if response.status != 200:
+                            logger.error(f"LangGraph error: {response.status}")
+                            continue
 
-                            # --- THIS IS THE CORRECTED LOGIC THAT WAS MISSING ---
-                            if current_event_name == "streaming_text_chunk":
-                                text_to_speak = data_json.get('streaming_text_chunk')
-                                if text_to_speak:
-                                    await self.speak_text(text_to_speak)
+                        async for event_name, data_json in self.parse_sse_stream(response):
+                            tasks_to_run = []
+                            
+                            if event_name == "streaming_text_chunk":
+                                # Don't await it directly. Add it to a list of tasks to run.
+                                tasks_to_run.append(self.speak_text(data_json.get('streaming_text_chunk', '')))
 
-                            elif current_event_name == "final_ui_actions":
+                            elif event_name == "final_ui_actions":
                                 ui_actions = data_json.get('ui_actions', [])
-                                logger.info(f"Processing {len(ui_actions)} UI actions from LangGraph.")
                                 for action_data in ui_actions:
-                                    await trigger_client_ui_action(
-                                        room=self._room,
-                                        client_identity=caller_identity,
-                                        action_type=action_data.get("action_type"),
-                                        parameters=action_data.get("parameters", {})
+                                    # Add each UI action to the list of tasks to run.
+                                    tasks_to_run.append(
+                                        trigger_client_ui_action(
+                                            room=self._room,
+                                            client_identity=caller_identity,
+                                            action_type=action_data.get("action_type"),
+                                            parameters=action_data.get("parameters", {})
+                                        )
                                     )
                             
-                            elif current_event_name == "stream_end":
-                                logger.info(f"SSE stream ended from LangGraph: {data_json.get('message')}")
-                            
-                            else:
-                                # This will catch 'stream_start' and any others without breaking the loop
-                                logger.debug(f"Received SSE event '{current_event_name}' with no specific handler.")
-                            
-                            # Reset for the next event
-                            current_event_name = None
-                            current_event_data_lines = []
-        
-        except Exception as e:
-            logger.error(f"Error in trigger_langgraph_task for task '{task_name}': {e}", exc_info=True)
+                            # +++ RUN ALL TASKS FOR THIS EVENT CONCURRENTLY +++
+                            if tasks_to_run:
+                                await asyncio.gather(*tasks_to_run)
+            except Exception as e:
+                logger.error(f"Error in agent processing loop: {e}", exc_info=True)
+
+    async def parse_sse_stream(self, response):
+        current_event_name = None
+        current_event_data_lines = []
+        async for line_bytes in response.content:
+            line = line_bytes.decode('utf-8').strip()
+            if line.startswith('event:'):
+                current_event_name = line[len('event:'):].strip()
+            elif line.startswith('data:'):
+                current_event_data_lines.append(line[len('data:'):].strip())
+            elif not line and current_event_name:
+                data_str = "\n".join(current_event_data_lines)
+                yield current_event_name, json.loads(data_str)
+                current_event_name = None
+                current_event_data_lines = []
 
 
 async def entrypoint(ctx: JobContext):
@@ -208,7 +214,7 @@ async def entrypoint(ctx: JobContext):
     main_agent_session = agents.AgentSession(  # Renamed for clarity
         stt=deepgram.STT(model="nova-2", language="multi"),  # nova-2 or nova-3
         llm=CustomLLMBridge,  # Pass agent instance
-        tts=deepgram.TTS,
+        tts=deepgram.TTS(model="aura-asteria-en", api_key=os.environ.get("DEEPGRAM_API_KEY")),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
@@ -260,22 +266,20 @@ async def entrypoint(ctx: JobContext):
     except Exception as e:
         logging.error(f"Failed to send 'agent_ready' handshake: {e}", exc_info=True)
 
-    # Keep the agent alive to listen for events and RPC calls
-    logging.info("Agent is running and waiting for events...")
-    try:
-        await asyncio.Event().wait()  # Wait indefinitely
-    except asyncio.CancelledError:
-        logging.info("Agent entrypoint task cancelled.")
-    finally:
-        logging.info("Agent shutting down.")
-    # +++ END OF NEW HANDSHAKE LOGIC +++
-
-    logger.info("Rox agent fully operational. Starting main VAD session...")
-    await main_agent_session.start(room=ctx.room, agent=rox_agent_instance)
-
-    await asyncio.Event().wait()  # Keep agent alive
+    logger.info("Rox agent fully operational. Starting main session and processing loop...")
     
-    logger.info(f"Agent job for room '{ctx.room.name}' has ended.")
+    # +++ START THE PROCESSING LOOP AS A BACKGROUND TASK +++
+    processing_task = asyncio.create_task(rox_agent_instance.processing_loop())
+
+    # Start the main agent session for VAD/STT (voice activity)
+    await main_agent_session.start(
+        room=ctx.room,
+        agent=rox_agent_instance,
+    )
+    
+    # The agent will now stay alive, and the processing_task will handle RPCs
+    # in the background.
+    await processing_task # This will keep the entrypoint alive
 
 if __name__ == "__main__":
     # The livekit.agents.cli framework handles all argument parsing.
