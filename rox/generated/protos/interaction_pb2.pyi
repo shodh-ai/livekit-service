@@ -40,6 +40,8 @@ class ClientUIActionType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SET_EDITOR_CONTENT: _ClassVar[ClientUIActionType]
     APPEND_TEXT_TO_EDITOR_REALTIME: _ClassVar[ClientUIActionType]
     STRIKETHROUGH_TEXT_RANGES: _ClassVar[ClientUIActionType]
+    END_DOUBT_LISTENING_SESSION: _ClassVar[ClientUIActionType]
+    START_DOUBT_LISTENING_SESSION: _ClassVar[ClientUIActionType]
 NO_ACTION: ClientUIActionType
 SHOW_ALERT: ClientUIActionType
 UPDATE_TEXT_CONTENT: ClientUIActionType
@@ -70,6 +72,8 @@ SHOW_TOOLTIP_OR_COMMENT: ClientUIActionType
 SET_EDITOR_CONTENT: ClientUIActionType
 APPEND_TEXT_TO_EDITOR_REALTIME: ClientUIActionType
 STRIKETHROUGH_TEXT_RANGES: ClientUIActionType
+END_DOUBT_LISTENING_SESSION: ClientUIActionType
+START_DOUBT_LISTENING_SESSION: ClientUIActionType
 
 class Empty(_message.Message):
     __slots__ = ()
@@ -158,6 +162,10 @@ class InvokeAgentTaskRequest(_message.Message):
     task_name: str
     json_payload: str
     def __init__(self, task_name: _Optional[str] = ..., json_payload: _Optional[str] = ...) -> None: ...
+
+class PushToTalkRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
 
 class HighlightRangeProto(_message.Message):
     __slots__ = ("id", "start", "end", "type", "message", "wrong_version", "correct_version")
