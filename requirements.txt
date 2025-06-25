@@ -4,6 +4,8 @@ python-dotenv==1.1.0
 fastapi==0.104.1
 uvicorn==0.23.2
 openai==1.75.0
+grpcio==1.75.0
+grpcio-tools==1.75.0
 
 # Backend (Flask) dependencies
 flask==3.0.3

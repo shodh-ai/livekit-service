@@ -41,6 +41,10 @@ class ClientUIActionType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SET_EDITOR_CONTENT: _ClassVar[ClientUIActionType]
     APPEND_TEXT_TO_EDITOR_REALTIME: _ClassVar[ClientUIActionType]
     STRIKETHROUGH_TEXT_RANGES: _ClassVar[ClientUIActionType]
+    START_LISTENING: _ClassVar[ClientUIActionType]
+    STOP_LISTENING: _ClassVar[ClientUIActionType]
+    EXECUTE_CONVERSATIONAL_SEQUENCE: _ClassVar[ClientUIActionType]
+    PROMPT_FOR_USER_INPUT: _ClassVar[ClientUIActionType]
 NO_ACTION: ClientUIActionType
 SHOW_ALERT: ClientUIActionType
 UPDATE_TEXT_CONTENT: ClientUIActionType
@@ -71,6 +75,10 @@ SHOW_TOOLTIP_OR_COMMENT: ClientUIActionType
 SET_EDITOR_CONTENT: ClientUIActionType
 APPEND_TEXT_TO_EDITOR_REALTIME: ClientUIActionType
 STRIKETHROUGH_TEXT_RANGES: ClientUIActionType
+START_LISTENING: ClientUIActionType
+STOP_LISTENING: ClientUIActionType
+EXECUTE_CONVERSATIONAL_SEQUENCE: ClientUIActionType
+PROMPT_FOR_USER_INPUT: ClientUIActionType
 
 class Empty(_message.Message):
     __slots__ = ()

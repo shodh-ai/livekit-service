@@ -10,14 +10,17 @@ COPY requirements.txt .
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install dependencies for rox
+COPY rox/requirements.txt rox/requirements.txt
+RUN pip install --no-cache-dir -r rox/requirements.txt
+
 # Copy the application code
 COPY . .
 
 # Expose the service port (adjust based on your configuration)
-EXPOSE 8000
-
+EXPOSE 5005
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 
 # Start the application
-CMD ["python", "-m", "full_implementation"] 
+CMD ["python", "main.py"]
