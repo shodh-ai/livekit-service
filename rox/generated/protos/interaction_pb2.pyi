@@ -45,6 +45,10 @@ class ClientUIActionType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     STOP_LISTENING: _ClassVar[ClientUIActionType]
     EXECUTE_CONVERSATIONAL_SEQUENCE: _ClassVar[ClientUIActionType]
     PROMPT_FOR_USER_INPUT: _ClassVar[ClientUIActionType]
+    START_LISTENING_VISUAL: _ClassVar[ClientUIActionType]
+    STOP_LISTENING_VISUAL: _ClassVar[ClientUIActionType]
+    UNMUTE_MICROPHONE: _ClassVar[ClientUIActionType]
+    MUTE_MICROPHONE: _ClassVar[ClientUIActionType]
 NO_ACTION: ClientUIActionType
 SHOW_ALERT: ClientUIActionType
 UPDATE_TEXT_CONTENT: ClientUIActionType
@@ -79,6 +83,10 @@ START_LISTENING: ClientUIActionType
 STOP_LISTENING: ClientUIActionType
 EXECUTE_CONVERSATIONAL_SEQUENCE: ClientUIActionType
 PROMPT_FOR_USER_INPUT: ClientUIActionType
+START_LISTENING_VISUAL: ClientUIActionType
+STOP_LISTENING_VISUAL: ClientUIActionType
+UNMUTE_MICROPHONE: ClientUIActionType
+MUTE_MICROPHONE: ClientUIActionType
 
 class Empty(_message.Message):
     __slots__ = ()
