@@ -9,11 +9,10 @@ import logging
 import argparse
 import asyncio
 import json
+import time  # Added for silence-gap measurement
 import uuid
 import base64
 from pathlib import Path
-from typing import Dict, Optional
-
 from urllib.parse import urlparse, urlunparse
 from livekit.plugins import noise_cancellation
 from livekit.plugins import deepgram, silero
@@ -41,6 +40,9 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+
 
 # --- Environment Loading and Validation ---
 load_dotenv(dotenv_path=project_root / ".env")
@@ -96,207 +98,247 @@ async def trigger_client_ui_action(
 
 
 class RoxAgent(Agent):
-    """Rox AI assistant with robust, concurrent task and interruption handling.""" 
+    # Action constant for reactive listening
+    ACTION_LISTEN_STREAM = "LISTEN_AND_STREAM_TO_LLM"
     def __init__(self, **kwargs):
-        super().__init__(instructions="You are a helpful voice assistant.", **kwargs)
+        # Set default instructions if not provided, to satisfy Agent base class
+        kwargs.setdefault(
+            "instructions",
+            "You are Rox, an AI assistant for students using the learning platform. You help students understand their learning status and guide them through their learning journey."
+        )
+        super().__init__(**kwargs)
+        self.task_queue: asyncio.Queue[tuple] = asyncio.Queue()
         self.agent_session: Optional[agents.AgentSession] = None
+        self.transcript_queue: asyncio.Queue[str] = asyncio.Queue() # Add this back!
         self._room: Optional[rtc.Room] = None
         self._job_ctx: Optional[JobContext] = None
-        self.task_queue: asyncio.Queue[tuple] = asyncio.Queue()
-        self.transcript_queue: asyncio.Queue[str] = asyncio.Queue()
-        self.active_tasks: Dict[str, asyncio.Task] = {}
-        self.current_tts_task: Optional[asyncio.Task] = None
 
-    async def speak_text(self, text: str):
-        """Cancels any previous speech and starts a new TTS task."""
-        # Cancel any TTS task that's already running.
-        if self.current_tts_task and not self.current_tts_task.done():
-            self.current_tts_task.cancel()
-            logger.info("Interrupted previous TTS task.")
-
-        # Create and store the new TTS task.
-        self.current_tts_task = asyncio.create_task(self._execute_tts(text))
-        await self.current_tts_task
-
-    async def _execute_tts(self, text: str):
-        """Helper to execute the TTS call, allowing it to be cancelled."""
-        if not self.agent_session: return
-        try:
-            logger.info(f"Speaking: '{text[:50]}...'")
-            await self.agent_session.say(text, allow_interruptions=True)
-            logger.info(f"Finished speaking: '{text[:50]}...'")
-        except asyncio.CancelledError:
-            logger.info(f"TTS task for '{text[:50]}...' was explicitly cancelled.")
-            # Clear the session's internal TTS queue to stop any pending speech
-            self.agent_session.interrupt()
-        except Exception as e:
-            logger.error(f"Error during TTS playback: {e}", exc_info=True)
-
-    async def on_transcript(self, transcript: str, participant: rtc.RemoteParticipant, is_final: bool):
-        if is_final:
-            logger.info(f"Transcript received from {participant.identity}: '{transcript}'")
-            # Put the transcript on the queue for the handle_listen_step to pick up.
-            await self.transcript_queue.put(transcript)
-
-    async def trigger_langgraph_task(self, task_name: str, json_payload: str, caller_identity: str):
-        """Handles an incoming RPC, manages interruptions, and queues the new task."""
-        task_id = f"task-{uuid.uuid4().hex[:8]}"
-
-        # If this is an interruption, cancel all other active tasks.
-        if task_name == "user_wants_to_interrupt":
-            logger.warning(f"INTERRUPTION triggered by {caller_identity}. Cancelling all active tasks.")
-            active_task_ids = list(self.active_tasks.keys())
-            for active_task_id in active_task_ids:
-                task_to_cancel = self.active_tasks.get(active_task_id)
-                if task_to_cancel:
-                    task_to_cancel.cancel()
-                    logger.info(f"Cancellation requested for task {active_task_id}.")
-            # Also cancel any standalone TTS that might be running
-            if self.current_tts_task and not self.current_tts_task.done():
-                 self.current_tts_task.cancel()
-
-        logger.info(f"Queueing task '{task_name}' with ID {task_id}.")
-        await self.task_queue.put((task_name, json_payload, caller_identity, task_id))
-
-    async def _handle_single_task(self, task_name: str, json_payload: str, caller_identity: str, task_id: str):
-        logger.info(f"Background processing started for task {task_id} ('{task_name}').")
-        try:
-            langgraph_url = os.getenv("MY_CUSTOM_AGENT_URL")
-            if not langgraph_url: raise ValueError("MY_CUSTOM_AGENT_URL not set")
-            endpoint = urlunparse(urlparse(langgraph_url)._replace(path="/invoke_task_streaming"))
-            request_body = {"task_name": task_name, "json_payload": json_payload}
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(endpoint, json=request_body) as response:
-                    if response.status != 200:
-                        raise Exception(f"LangGraph service returned status {response.status}")
-
-                    async for event_name, data_json in self.parse_sse_stream(response):
-                        if asyncio.current_task().cancelled(): break
-
-                        # --- THIS IS THE FIX ---
-                        # We only care about one event type now: "final_response"
-                        if event_name == "final_response":
-                            logger.info(f"Received final_response from LangGraph for task {task_id}.")
-                            
-                            # Default to the simple TTS if no sequence is found
-                            text_to_speak = data_json.get("final_text_for_tts")
-                            ui_actions = data_json.get("final_ui_actions", [])
-                            
-                            sequence_action = next((a for a in ui_actions if a.get("action_type") == "EXECUTE_CONVERSATIONAL_SEQUENCE"), None)
-
-                            if sequence_action:
-                                # If we find a sequence, we orchestrate it.
-                                sequence = sequence_action.get("parameters", {}).get("sequence", [])
-                                logger.info(f"Orchestrating a sequence of {len(sequence)} actions.")
-                                for step in sequence:
-                                    if asyncio.current_task().cancelled(): break
-                                    step_type = step.get("type")
-                                    if step_type == "tts":
-                                        await self.speak_text(step.get("content", ""))
-                                    elif step_type == "listen":
-                                        await self.handle_listen_step(step, caller_identity)
-                                # Once the sequence is done, we can break from the SSE loop
-                                # as we've handled the main payload.
-                                break 
-                            elif text_to_speak:
-                                # If there's no sequence, just speak the main text.
-                                await self.speak_text(text_to_speak)
-
-                            # Handle any other non-sequence UI actions
-                            other_ui_actions = [a for a in ui_actions if a.get("action_type") != "EXECUTE_CONVERSATIONAL_SEQUENCE"]
-                            for action in other_ui_actions:
-                                await trigger_client_ui_action(self._room, caller_identity, action.get("action_type", ""), action.get("parameters"))
-                            
-                            # Break after handling the main response
-                            break
-        except asyncio.CancelledError:
-            logger.info(f"Task {task_id} was successfully cancelled.")
-        except Exception as e:
-            logger.error(f"Error during handling of task {task_id}: {e}", exc_info=True)
-        finally:
-            if task_id in self.active_tasks:
-                del self.active_tasks[task_id]
-            logger.info(f"Finished and cleaned up task {task_id}.")
-
-    async def handle_listen_step(self, listen_step: dict, caller_identity: str):
+    # Add this back from Opinion 2's code
+    def on_transcript(self, transcript: str, participant: rtc.RemoteParticipant, is_final: bool):
         """
-        Orchestrates a "listen" step by managing the user's audio track and
-        waiting for a transcript from the VAD/STT pipeline.
+        Callback fired by AgentSession whenever STT produces a transcript.
+        AgentSession invokes this *synchronously*, so the handler itself must be
+        synchronous; otherwise the coroutine would never be awaited and the
+        body would not run. We therefore enqueue the transcript with
+        `put_nowait`.
         """
-        timeout_s = listen_step.get("timeout_ms", 5000) / 1000.0
-        logger.info(f"Agent is now 'listening' for a transcript from {caller_identity} for {timeout_s}s.")
+        # Ignore empty strings that some STT engines emit.
+        if transcript.strip():
+            logger.info(
+                "Transcript received from %s: '%s' (is_final=%s)",
+                participant.identity,
+                transcript,
+                is_final,
+            )
+            # Non-blocking enqueue; Queue is unbounded by default.
+            self.transcript_queue.put_nowait(transcript)
 
-        # Find the participant to listen to.
-        participant = self._room.remote_participants.get(caller_identity)
-        if not participant:
-            logger.error(f"Cannot listen, participant {caller_identity} not found.")
-            return
+    async def handle_listen_and_stream(self, caller_identity: str):
+        """Reactive listen that commits the user turn after a silence gap."""
+        logger.info("Reactive listen initiated – STT->LLM streaming active.")
 
-        # This is the core logic. We tell the AgentSession to expect speech from this user.
-        # The VAD/STT pipeline for this user is now "active."
-        self.agent_session.start_listening_to(participant)
-        
-        # We also send a UI action to the frontend to show a visual indicator.
+        # Notify UI that we are listening
         await trigger_client_ui_action(
             self._room,
             caller_identity,
-            "START_LISTENING_VISUAL", # A new, simple UI action
-            {"prompt_text": listen_step.get("prompt_if_silent", "I'm listening...")}
+            "START_LISTENING_VISUAL",
+            {},
         )
 
-        try:
-            # Wait for the next transcript to arrive from the STT pipeline.
-            # The agent's 'on_transcript' method will be called automatically by the AgentSession.
-            # We need a way to get that transcript back here. An asyncio.Queue is perfect for this.
-            
-            # Assume self.transcript_queue = asyncio.Queue() was added in __init__
-            transcript = await asyncio.wait_for(self.transcript_queue.get(), timeout=timeout_s)
-            
-            logger.info(f"Received transcript while listening: '{transcript}'")
-            
-            # We received a transcript, so we can stop listening.
-            self.agent_session.stop_listening_to(participant)
-            await trigger_client_ui_action(self._room, caller_identity, "STOP_LISTENING_VISUAL", {})
+        # Parameters
+        silence_gap_s = float(os.getenv("REACTIVE_LISTEN_SILENCE_GAP_S", "1.0"))
+        poll_interval_s = 0.1
+        last_speaking_ts: Optional[float] = None
 
-            # Now, trigger a new LangGraph task to handle the user's response.
+        logger.debug(
+            "Reactive listen loop starting (silence_gap=%ss poll=%ss)",
+            silence_gap_s,
+            poll_interval_s,
+        )
+
+        # Wait until the user has stopped speaking for `silence_gap_s` seconds
+        while True:
+            await asyncio.sleep(poll_interval_s)
+            user_state = self.agent_session.user_state if self.agent_session else None
+            if user_state == "speaking":
+                last_speaking_ts = time.time()
+                logger.debug("User speaking… resetting silence timer (ts=%s)", last_speaking_ts)
+            elif last_speaking_ts is None:
+                # Haven't heard the user yet; keep waiting
+                continue
+            elif (time.time() - last_speaking_ts) >= silence_gap_s:
+                logger.debug("Silence gap exceeded (%.2fs ≥ %.2fs). Committing user turn.",
+                             time.time() - last_speaking_ts,
+                             silence_gap_s)
+                break
+
+        try:
+            self.agent_session.commit_user_turn()
+            logger.info("User turn committed to AgentSession – STT transcript handed to LLM.")
+        except Exception as e:
+            logger.error("Failed to commit user turn: %s", e, exc_info=True)
+
+        # Notify UI that listening has ended
+        await trigger_client_ui_action(
+            self._room,
+            caller_identity,
+            "STOP_LISTENING_VISUAL",
+            {},
+        )
+
+    async def speak_text(self, text: str):
+        # A simple helper for one-off speech
+        if self.agent_session:
+            await self.agent_session.say(text, allow_interruptions=False) # Don't allow interruptions for small prompts
+
+
+    async def wait_for_user_transcript(self, listen_config: dict, caller_identity: str) -> Optional[str]:
+        """
+        An "Active Listener" that cleans up stale data and uses a more patient timeout.
+        """
+        # FIX 1: Increase the silence timeout to be more forgiving of network latency.
+        # 2.0 seconds was too short. 3.0 is a much safer default.
+        silence_timeout = listen_config.get("silence_timeout_s", 5.0) 
+    
+        logger.info(f"Active Listener starting. Silence timeout: {silence_timeout}s")
+
+    # FIX 2: Perform queue hygiene. Empty any stale transcripts from a previous,
+    # timed-out listen attempt before we start waiting for the new one.
+        while not self.transcript_queue.empty():
+            stale_transcript = self.transcript_queue.get_nowait()
+            logger.warning(f"Discarding stale transcript from queue: '{stale_transcript}'")
+
+        # Send the UI action to show we're listening
+        await trigger_client_ui_action(
+            self._room,
+            caller_identity,
+            "START_LISTENING_VISUAL",
+            {}
+        )
+
+        full_transcript = ""
+        while True:
+            try:
+                new_chunk = await asyncio.wait_for(
+                    self.transcript_queue.get(),
+                    timeout=silence_timeout
+                )
+                full_transcript += f" {new_chunk}"
+            
+            # (Optional but good) De-dupe the queue if multiple chunks arrive at once
+                while not self.transcript_queue.empty():
+                    full_transcript += f" {self.transcript_queue.get_nowait()}"
+
+            except asyncio.TimeoutError:
+                logger.info("Active listener timed out. User has finished speaking.")
+                break
+
+        full_transcript = full_transcript.strip()
+
+        # Tell the UI we're done listening
+        await trigger_client_ui_action(
+            self._room,
+            caller_identity,
+        "STOP_LISTENING_VISUAL",
+        {}
+    )
+
+        if full_transcript:
+            logger.info(f"Final collected transcript: '{full_transcript}'")
+            return full_transcript
+        else:
+            logger.info("No speech was detected during the listening window.")
+            prompt = listen_config.get("prompt_if_silent")
+            if prompt:
+                await self.speak_text(prompt)
+            return None
+    async def handle_speak_then_listen(self, parameters: dict, caller_identity: str):
+        logger.info(f"Handling SPEAK_THEN_LISTEN for {caller_identity}")
+        text_to_speak = parameters.get("text_to_speak")
+        listen_config = parameters.get("listen_config", {})
+
+        try:
+            if text_to_speak:
+                logger.info("Speaking with interruptions enabled.")
+                await self.agent_session.say(text_to_speak, allow_interruptions=True)
+
+            logger.info("Speech completed naturally. Now listening.")
+            transcript = await self.wait_for_user_transcript(listen_config, caller_identity)
+
+            if transcript:
+                logger.info(f"User responded: {transcript}. Triggering 'handle_student_response'.")
+                await self.trigger_langgraph_task(
+                    task_name="handle_student_response",
+                    json_payload=json.dumps({"transcript": transcript}),
+                    caller_identity=caller_identity
+                )
+            else:
+                logger.info("User was silent after speech. Triggering 'handle_student_silence'.")
+                await self.trigger_langgraph_task(
+                    task_name="handle_student_silence",
+                    json_payload=json.dumps({"speech_id": parameters.get("speech_id")}),
+                    caller_identity=caller_identity
+                )
+
+        # --- THIS IS THE CORRECTED EXCEPTION NAME ---
+        except agents.tts.TTSCancelled:
+            logger.warning("HANDLED INTERRUPT: Speech was cancelled by user.")
+            
+            await self.speak_text("Of course, what's on your mind?")
+            user_doubt = await self.wait_for_user_transcript({}, caller_identity)
+
+            if not user_doubt:
+                logger.info("User interrupted but said nothing. Ending this flow.")
+                return
+
+            context = {
+                "text_that_was_being_spoken": text_to_speak,
+                "user_doubt": user_doubt
+            }
+
+            logger.info("Triggering 'resolve_student_doubt' for LangGraph.")
             await self.trigger_langgraph_task(
-                task_name="handle_student_response",
-                json_payload=json.dumps({
-                    "user_id": caller_identity, # Assuming participant identity is the user_id
-                    "transcript": transcript,
-                    "expected_intent": listen_step.get("expected_intent")
-                }),
+                task_name="resolve_student_doubt",
+                json_payload=json.dumps(context),
                 caller_identity=caller_identity
             )
 
-        except asyncio.TimeoutError:
-            logger.info(f"Listen step timed out for {caller_identity}. No transcript received.")
-            self.agent_session.stop_listening_to(participant)
-            await trigger_client_ui_action(self._room, caller_identity, "STOP_LISTENING_VISUAL", {})
-            
-            # If there's a prompt for silence, speak it.
-            if prompt_if_silent := listen_step.get("prompt_if_silent"):
-                await self.speak_text(prompt_if_silent)
+    async def trigger_langgraph_task(self, task_name: str, json_payload: str, caller_identity: str):
+        """Puts a new task onto the agent's processing queue."""
+        logger.info(f"Queueing LangGraph task: '{task_name}' for user '{caller_identity}'.")
+        await self.task_queue.put((task_name, json_payload, caller_identity))
 
-        finally:
-            # Ensure we always stop listening in case of other errors.
-            self.agent_session.stop_listening_to(participant)
+    async def fetch_plan_from_langgraph(self, task_name: str, json_payload: str) -> Optional[dict]:
+        logger.info(f"Connecting to LangGraph for task '{task_name}'...")
+        langgraph_url = os.getenv("MY_CUSTOM_AGENT_URL")
+        if not langgraph_url:
+            logger.error("MY_CUSTOM_AGENT_URL is not set. Cannot contact LangGraph.")
+            return None
 
-    async def processing_loop(self):
-        """The main non-blocking loop to dispatch tasks.""" 
-        logger.info("Agent's main processing loop is running.")
-        while True:
-            task_name, json_payload, caller_identity, task_id = await self.task_queue.get()
-            
-            logger.info(f"Dequeued task {task_id} ('{task_name}'). Creating background handler.")
-            
-            # Create the background task and store it in our tracking dictionary.
-            task = asyncio.create_task(
-                self._handle_single_task(task_name, json_payload, caller_identity, task_id)
-            )
-            self.active_tasks[task_id] = task
-            self.task_queue.task_done()
+        endpoint = urlunparse(urlparse(langgraph_url)._replace(path="/invoke_task_streaming"))
+        request_body = {"task_name": task_name, "json_payload": json_payload}
+        
+        final_response = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(endpoint, json=request_body) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"LangGraph service returned error {response.status}: {error_text}")
+                        return None
+
+                    # Your SSE parsing logic can be used here.
+                    # The goal is to find the event that contains the final plan.
+                    # Assuming your graph sends an event named "final_response" at the end.
+                    async for event in self.parse_sse_stream(response): 
+                        if event.get("event_name") == "final_response":
+                            logger.info("Received final_response from LangGraph.")
+                            final_response = event.get("data")
+                            break # We have the full plan, so we can stop listening for events
+            return final_response
+        except Exception as e:
+            logger.error(f"Failed to fetch plan from LangGraph: {e}", exc_info=True)
+            return None
 
     async def parse_sse_stream(self, response):
         current_event_name = None
@@ -309,9 +351,46 @@ class RoxAgent(Agent):
                 current_event_data_lines.append(line[len('data:'):].strip())
             elif not line and current_event_name:
                 data_str = "\n".join(current_event_data_lines)
-                yield current_event_name, json.loads(data_str)
+                yield {"event_name": current_event_name, "data": json.loads(data_str)}
                 current_event_name = None
                 current_event_data_lines = []
+
+    async def processing_loop(self):
+        logger.info("Agent's main processing loop started.")
+        while True:
+            task_name, json_payload, caller_identity = await self.task_queue.get()
+            
+            # Here you would fetch the plan from LangGraph
+            # For this example, let's assume `plan` is the parsed JSON response
+            
+            # A mock `plan` for demonstration
+            # In reality, you'd make the aiohttp call to LangGraph here
+            langgraph_plan = await self.fetch_plan_from_langgraph(task_name, json_payload)
+
+            if not langgraph_plan or not langgraph_plan.get("final_ui_actions"):
+                continue
+
+            # Process all actions in the plan
+            for action in langgraph_plan["final_ui_actions"]:
+                action_type = action.get("action_type")
+                parameters = action.get("parameters", {})
+
+                if action_type == "SPEAK_THEN_LISTEN":
+                # Reactive: speak (if needed) then rely on STT->LLM streaming
+                    text_to_speak = parameters.get("text_to_speak") or parameters.get("text")
+                    if text_to_speak:
+                        logger.info("Reactive SPEAK_THEN_LISTEN: speaking then entering streaming listen mode.")
+                        await self.agent_session.say(text_to_speak, allow_interruptions=True)
+                    await self.handle_listen_and_stream(caller_identity)
+                elif action_type == "LISTEN_AND_STREAM_TO_LLM":
+                # Legacy queued behaviour: collect transcript then process
+                    await self.handle_speak_then_listen(parameters, caller_identity)
+                elif action_type == "SPEAK_TEXT": # For simple, non-interactive speech
+                    await self.speak_text(parameters.get("text", ""))
+                else: # For all other simple UI actions
+                    await trigger_client_ui_action(
+                        self._room, caller_identity, action_type, parameters
+                    )
 
 
 async def entrypoint(ctx: JobContext):
@@ -330,30 +409,42 @@ async def entrypoint(ctx: JobContext):
     # and the main VAD/STT/TTS session.
     
     rox_agent_instance = RoxAgent()
+    ctx.rox_agent = rox_agent_instance  # Make agent findable by the RPC service
     rox_agent_instance._job_ctx = ctx
     rox_agent_instance._room = ctx.room
     
+    # Instantiate minimal LLM bridge that forwards transcripts to the FastAPI backend.
+    llm_bridge = CustomLLMBridge()
+
     main_agent_session = agents.AgentSession(  # Renamed for clarity
         stt=deepgram.STT(model="nova-2", language="multi"),  # nova-2 or nova-3
-        llm=CustomLLMBridge,  # Pass agent instance
+        llm=llm_bridge,
         tts=deepgram.TTS(model="aura-asteria-en", api_key=os.environ.get("DEEPGRAM_API_KEY")),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
     rox_agent_instance.agent_session = main_agent_session
+
+    # ------------------------------------------------------------------
+    # DEBUG: Log user_state transitions to verify VAD / turn-detection.
+    # This helps diagnose "turn detection never fires" (Checklist item #4).
+    # ------------------------------------------------------------------
+    def _log_user_state(ev):
+        logger.debug("AgentSession user_state changed: %s -> %s", ev.old_state, ev.new_state)
+
+    main_agent_session.on("user_state_changed", _log_user_state)
     
     # --- RPC REGISTRATION (THE CRITICAL FIX) ---
     # This is where we register all the methods the frontend can call.
     
-    agent_rpc_service = AgentInteractionService(agent_instance=rox_agent_instance)
+    agent_rpc_service = AgentInteractionService(ctx=ctx)
     service_name = "rox.interaction.AgentInteraction"
     local_participant = ctx.room.local_participant
     
     logger.info("Registering all RPC handlers...")
     try:
         local_participant.register_rpc_method(f"{service_name}/InvokeAgentTask", agent_rpc_service.InvokeAgentTask)
-        local_participant.register_rpc_method(f"{service_name}/HandleFrontendButton", agent_rpc_service.HandleFrontendButton)
-        local_participant.register_rpc_method(f"{service_name}/NotifyPageLoadV2", agent_rpc_service.NotifyPageLoadV2)
+        local_participant.register_rpc_method(f"{service_name}/RequestInterrupt", agent_rpc_service.RequestInterrupt)
         local_participant.register_rpc_method(f"{service_name}/TestPing", agent_rpc_service.TestPing)
         
         logging.info("agent rpc handlers registered")

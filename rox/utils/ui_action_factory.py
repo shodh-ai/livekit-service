@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+import json
 from typing import Callable, Dict, Any
 
 from livekit.rtc import Room
@@ -50,12 +51,29 @@ def _build_append_text_payload(request_pb: interaction_pb2.AgentToClientUIAction
     logger.info(f"Built append_text_to_editor_realtime payload with chunk size: {len(text_chunk)}")
 
 
+def _build_conversational_sequence_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
+    """Builds the payload for EXECUTE_CONVERSATIONAL_SEQUENCE."""
+    sequence_data = params.get("sequence", [])  # This is a Python list/dict
+    
+    # The protobuf map expects a string value, so we must serialize the sequence to JSON.
+    sequence_json_str = json.dumps(sequence_data)
+    
+    request_pb.parameters["sequence"] = sequence_json_str
+    
+    # For logging, we can report the number of steps.
+    if isinstance(sequence_data, list):
+        logger.info(f"Built conversational sequence payload with {len(sequence_data)} steps.")
+    else:
+        logger.info("Built conversational sequence payload.")
+
+
 # --- The Action Registry ---
 ACTION_BUILDER_REGISTRY: Dict[str, ActionBuilder] = {
     "HIGHLIGHT_TEXT_RANGES": _build_highlight_payload,
     "SHOW_ALERT": _build_alert_payload,
     "SET_EDITOR_CONTENT": _build_set_editor_content_payload,
     "APPEND_TEXT_TO_EDITOR_REALTIME": _build_append_text_payload,
+    "EXECUTE_CONVERSATIONAL_SEQUENCE": _build_conversational_sequence_payload,
 }
 
 def build_ui_action_request(action_type_str: str, parameters: Dict[str, Any]) -> interaction_pb2.AgentToClientUIActionRequest:

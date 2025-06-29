@@ -1,76 +1,53 @@
-# rpc_services.py (CLEANED UP AND FINAL VERSION)
+# rpc_services.py (FINAL, PRODUCTION-READY VERSION)
 
 import logging
 import json
 import base64
 import asyncio
+from typing import TYPE_CHECKING
 
+from livekit.agents import JobContext
 from livekit.rtc.rpc import RpcInvocationData
 from generated.protos import interaction_pb2
+
+if TYPE_CHECKING:
+    from main import RoxAgent
 
 logger = logging.getLogger(__name__)
 
 class AgentInteractionService:
-    def __init__(self, agent_instance=None):
-        self.agent_instance = agent_instance
-        logger.info("AgentInteractionService initialized.")
-
-    async def _dispatch_task(self, task_name: str, json_payload: str, caller_identity: str):
-        """A helper to asynchronously trigger the LangGraph task."""
-        if self.agent_instance:
-            logger.info(f"Dispatching task '{task_name}' to LangGraph for caller '{caller_identity}'.")
-            asyncio.create_task(
-                self.agent_instance.trigger_langgraph_task(task_name, json_payload, caller_identity)
-            )
-        else:
-            logger.error(f"Cannot dispatch task '{task_name}': Agent instance is not available.")
+    def __init__(self, ctx: JobContext):
+        self._ctx = ctx
+        # self.agent_instance is now findable via the context
+        self.agent_instance: "RoxAgent" = ctx.rox_agent
 
     async def InvokeAgentTask(self, raw_payload: RpcInvocationData) -> str:
-        logger.info("[RPC] InvokeAgentTask invoked.")
+        """The universal RPC for triggering any LangGraph task."""
+        logger.info(f"[RPC] InvokeAgentTask received for task.")
         request = interaction_pb2.InvokeAgentTaskRequest()
         request.ParseFromString(base64.b64decode(raw_payload.payload))
-        
-        await self._dispatch_task(request.task_name, request.json_payload, raw_payload.caller_identity)
-        
+
+        # Queue the task for the agent to process, but don't wait for it.
+        await self.agent_instance.trigger_langgraph_task(
+            task_name=request.task_name,
+            json_payload=request.json_payload,
+            caller_identity=raw_payload.caller_identity
+        )
+
         response_pb = interaction_pb2.AgentResponse(status_message=f"Task '{request.task_name}' acknowledged.")
         return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
 
-    async def HandleFrontendButton(self, raw_payload: RpcInvocationData) -> str:
-        logger.info("[RPC] HandleFrontendButton invoked (as wrapper).")
-        request = interaction_pb2.FrontendButtonClickRequest()
-        request.ParseFromString(base64.b64decode(raw_payload.payload))
-        
-        # The button_id becomes the task_name. The custom_data is the JSON payload.
-        await self._dispatch_task(request.button_id, request.custom_data, raw_payload.caller_identity)
+    async def RequestInterrupt(self, raw_payload: RpcInvocationData) -> str:
+        """Handles the 'Raise Hand' button press. This is a high-priority control signal."""
+        logging.info("RPC: Received RequestInterrupt.")
+        if self.agent_instance and self.agent_instance.agent_session:
+            # This call is what triggers the TTSPlaybackCancelled exception
+            self.agent_instance.agent_session.interrupt()
+            logger.warning("Interruption signal sent to agent session.")
 
-        response_pb = interaction_pb2.AgentResponse(status_message=f"Button '{request.button_id}' acknowledged.")
-        return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
-
-    async def NotifyPageLoadV2(self, raw_payload: RpcInvocationData) -> str:
-        logger.info("[RPC] NotifyPageLoadV2 invoked.")
-        request = interaction_pb2.NotifyPageLoadRequest()
-        request.ParseFromString(base64.b64decode(raw_payload.payload))
-        
-        # Convert the page load into a generic task for LangGraph
-        task_name = "handle_page_load"
-        json_payload = json.dumps({
-            "user_id": request.user_id,
-            "session_id": request.session_id,
-            "current_page": request.current_page,
-            "task_stage": request.task_stage,
-            "chat_history": list(request.chat_history),
-        })
-        
-        await self._dispatch_task(task_name, json_payload, raw_payload.caller_identity)
-        
-        response_data = {"status": "success", "message": "Page load acknowledged."}
-        response_pb = interaction_pb2.AgentResponse(
-            status_message="Page load processed.",
-            data_payload=json.dumps(response_data)
-        )
+        response_pb = interaction_pb2.AgentResponse(status_message="Interrupt acknowledged.")
         return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
 
     async def TestPing(self, raw_payload: RpcInvocationData) -> str:
         logger.info(f"[RPC] TestPing received from {raw_payload.caller_identity}.")
-        response_pb = interaction_pb2.AgentResponse(status_message="Pong!")
-        return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+        return base64.b64encode(interaction_pb2.AgentResponse(status_message="Pong!").SerializeToString()).decode('utf-8')
