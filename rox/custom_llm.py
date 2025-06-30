@@ -76,18 +76,22 @@ class CustomLLMBridge(LLM):
                 yield _empty_chunk()
                 return
 
-            payload = {
+            inner_payload = {
                 "transcript": transcript,
                 "user_token": self._user_token,
                 "user_id": self._user_id,
             }
+            request_body = {
+                "task_name": "speaking_turn",
+                "json_payload": json.dumps(inner_payload),
+            }
             logger.info(
-                "Posting transcript (len=%d) to %s", len(transcript), self._streaming_url
+                "Posting speaking_turn (len=%d) to %s", len(transcript), self._streaming_url
             )
 
             try:
                 async with httpx.AsyncClient(timeout=120.0) as client:
-                    async with client.stream("POST", self._streaming_url, json=payload) as resp:
+                    async with client.stream("POST", self._streaming_url, json=request_body) as resp:
                         resp.raise_for_status()
                         async for chunk in _sse_to_chat_chunks(resp):
                             yield chunk
