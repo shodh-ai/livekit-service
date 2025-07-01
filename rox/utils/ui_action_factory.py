@@ -51,20 +51,94 @@ def _build_append_text_payload(request_pb: interaction_pb2.AgentToClientUIAction
     logger.info(f"Built append_text_to_editor_realtime payload with chunk size: {len(text_chunk)}")
 
 
-def _build_conversational_sequence_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
+def _build_display_visual_aid_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
+    """Builds the payload for DISPLAY_VISUAL_AID."""
+    commands_json = params.get("commands_json", "[]")
+    canvas_id = params.get("canvas_id", "")
+    clear_previous = params.get("clear_previous", False)
+    
+    # Populate the specific payload field
+    request_pb.display_visual_aid_payload.commands_json = str(commands_json)
+    if canvas_id:
+        request_pb.display_visual_aid_payload.canvas_id = str(canvas_id)
+    request_pb.display_visual_aid_payload.clear_previous = bool(clear_previous)
+    
+    logger.info(f"Built display_visual_aid payload with commands JSON of size: {len(commands_json)}")
+
+
+def _build_execute_conversational_sequence_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
     """Builds the payload for EXECUTE_CONVERSATIONAL_SEQUENCE."""
-    sequence_data = params.get("sequence", [])  # This is a Python list/dict
+    sequence = params.get("sequence", [])
+    # Convert the sequence to a JSON string
+    import json
+    sequence_json = json.dumps(sequence)
     
-    # The protobuf map expects a string value, so we must serialize the sequence to JSON.
-    sequence_json_str = json.dumps(sequence_data)
+    # Populate the payload field
+    request_pb.execute_conversational_sequence_payload.sequence_json = sequence_json
+    logger.info(f"Built execute_conversational_sequence payload with sequence of size: {len(sequence_json)}")
+
+
+def _build_display_remarks_list_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
+    """Builds the payload for DISPLAY_REMARKS_LIST."""
+    remarks_data = params.get("remarks", [])
     
-    request_pb.parameters["sequence"] = sequence_json_str
+    for r_data in remarks_data:
+        remark = request_pb.display_remarks_list_payload.remarks.add()
+        remark.id = str(r_data.get("id", ""))
+        remark.title = str(r_data.get("title", ""))
+        remark.content = str(r_data.get("content", ""))
+        if "type" in r_data:
+            remark.type = str(r_data.get("type"))
     
-    # For logging, we can report the number of steps.
-    if isinstance(sequence_data, list):
-        logger.info(f"Built conversational sequence payload with {len(sequence_data)} steps.")
-    else:
-        logger.info("Built conversational sequence payload.")
+    logger.info(f"Built display_remarks_list payload with {len(remarks_data)} remarks.")
+
+
+def _build_update_text_content_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
+    """Builds the payload for UPDATE_TEXT_CONTENT."""
+    text = params.get("text", "")
+    
+    # Populate the payload field
+    request_pb.update_text_content_payload.text = str(text)
+    logger.info(f"Built update_text_content payload with text of size: {len(text)}")
+
+
+def _build_replace_text_range_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
+    """Builds the payload for REPLACE_TEXT_RANGE."""
+    start = params.get("start", 0)
+    end = params.get("end", 0)
+    replacement = params.get("replacement", "")
+    
+    # Populate the payload field
+    request_pb.replace_text_range_payload.start = int(start)
+    request_pb.replace_text_range_payload.end = int(end)
+    request_pb.replace_text_range_payload.replacement = str(replacement)
+    
+    logger.info(f"Built replace_text_range payload for range {start}-{end}.")
+
+
+def _build_navigate_to_page_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
+    """Builds the payload for NAVIGATE_TO_PAGE."""
+    # For simple actions, we just populate the generic parameters map.
+    page_name = params.get("page_name")
+    if page_name:
+        request_pb.parameters["page_name"] = str(page_name)
+    
+    page_data = params.get("data_for_page")
+    if page_data:
+        # Ensure data is a JSON string
+        request_pb.parameters["data_for_page"] = json.dumps(page_data) if not isinstance(page_data, str) else page_data
+
+    logger.info(f"Built navigate_to_page payload with page_name: {page_name}")
+
+
+def _build_speak_text_payload(request_pb: interaction_pb2.AgentToClientUIActionRequest, params: Dict[str, Any]):
+    """Builds the payload for SPEAK_TEXT."""
+    # For TTS, we just populate the text parameter
+    text = params.get("text", "")
+    if text:
+        request_pb.parameters["text"] = str(text)
+    
+    logger.info(f"Built speak_text payload with text of length: {len(text)}")
 
 
 # --- The Action Registry ---
@@ -73,7 +147,13 @@ ACTION_BUILDER_REGISTRY: Dict[str, ActionBuilder] = {
     "SHOW_ALERT": _build_alert_payload,
     "SET_EDITOR_CONTENT": _build_set_editor_content_payload,
     "APPEND_TEXT_TO_EDITOR_REALTIME": _build_append_text_payload,
-    "EXECUTE_CONVERSATIONAL_SEQUENCE": _build_conversational_sequence_payload,
+    "DISPLAY_VISUAL_AID": _build_display_visual_aid_payload,
+    "EXECUTE_CONVERSATIONAL_SEQUENCE": _build_execute_conversational_sequence_payload,
+    "DISPLAY_REMARKS_LIST": _build_display_remarks_list_payload,
+    "UPDATE_TEXT_CONTENT": _build_update_text_content_payload,
+    "REPLACE_TEXT_RANGE": _build_replace_text_range_payload,
+    "NAVIGATE_TO_PAGE": _build_navigate_to_page_payload,
+    "SPEAK_TEXT": _build_speak_text_payload,
 }
 
 def build_ui_action_request(action_type_str: str, parameters: Dict[str, Any]) -> interaction_pb2.AgentToClientUIActionRequest:

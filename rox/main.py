@@ -68,10 +68,11 @@ async def trigger_client_ui_action(
         return None
 
     try:
-        logger.info(f"Building UI action '{action_type}' for client '{client_identity}'.")
+        logger.info(f"Building UI action '{action_type}' for client '{client_identity}'")
         # 1. Build the Protobuf message using the factory
         request_pb = build_ui_action_request(action_type, parameters or {})
         request_pb.request_id = f"ui-{uuid.uuid4().hex[:8]}"
+        logger.debug(f"UI action details - Type: {action_type}, Parameters: {parameters}, Request ID: {request_pb.request_id}")
 
         # 2. Serialize and send the RPC
         rpc_method_name = f"rox.interaction.ClientSideUI/PerformUIAction"
@@ -80,6 +81,9 @@ async def trigger_client_ui_action(
 
         logger.info(f"Sending RPC '{rpc_method_name}' to '{client_identity}'. Action: {action_type}")
 
+        # Log the full RPC details
+        logger.debug(f"RPC details: method={rpc_method_name}, client={client_identity}, payload_length={len(base64_encoded_payload)}")
+        
         response_payload_str = await room.local_participant.perform_rpc(
             destination_identity=client_identity,
             method=rpc_method_name,
@@ -370,10 +374,15 @@ class RoxAgent(Agent):
             if not langgraph_plan or not langgraph_plan.get("final_ui_actions"):
                 continue
 
+            logger.info(f"Processing LangGraph plan UI actions for '{caller_identity}'. Action count: {len(langgraph_plan.get('final_ui_actions', []))}")
+            logger.debug(f"Full plan from LangGraph: {langgraph_plan}")
+            
             # Process all actions in the plan
             for action in langgraph_plan["final_ui_actions"]:
                 action_type = action.get("action_type")
                 parameters = action.get("parameters", {})
+                
+                logger.info(f"Processing UI action: type={action_type}, parameters={parameters}")
 
                 if action_type == "SPEAK_THEN_LISTEN":
                 # Reactive: speak (if needed) then rely on STT->LLM streaming
@@ -388,9 +397,11 @@ class RoxAgent(Agent):
                 elif action_type == "SPEAK_TEXT": # For simple, non-interactive speech
                     await self.speak_text(parameters.get("text", ""))
                 else: # For all other simple UI actions
-                    await trigger_client_ui_action(
+                    logger.info(f"Sending UI action to client {caller_identity}: {action_type} with parameters {parameters}")
+                    response = await trigger_client_ui_action(
                         self._room, caller_identity, action_type, parameters
                     )
+                    logger.info(f"UI action response: {response}")
 
 
 async def entrypoint(ctx: JobContext):
@@ -419,7 +430,8 @@ async def entrypoint(ctx: JobContext):
     main_agent_session = agents.AgentSession(  # Renamed for clarity
         stt=deepgram.STT(model="nova-2", language="multi"),  # nova-2 or nova-3
         llm=llm_bridge,
-        tts=deepgram.TTS(model="aura-asteria-en", api_key=os.environ.get("DEEPGRAM_API_KEY")),
+        # Updated TTS configuration with simplified parameters that work with the API
+        tts=deepgram.TTS(api_key=os.environ.get("DEEPGRAM_API_KEY")),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
