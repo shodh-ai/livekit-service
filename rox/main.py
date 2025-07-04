@@ -17,13 +17,13 @@ from urllib.parse import urlparse, urlunparse
 from livekit.plugins import noise_cancellation
 from livekit.plugins import deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
-from custom_llm import CustomLLMBridge
-# Add project root to path for clean imports
+from livekit.agents.llm import LLM, ChatChunk, ChoiceDelta, ChatContext# Add project root to path for clean imports
 project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv
 from typing import Optional, Dict, Any
+from contextlib import asynccontextmanager
 
 # Third-party imports
 import aiohttp
@@ -98,8 +98,61 @@ async def trigger_client_ui_action(
 
 
 class RoxAgent(Agent):
-    # Action constant for reactive listening
-    ACTION_LISTEN_STREAM = "LISTEN_AND_STREAM_TO_LLM"
+    class TranscriptInterceptor(LLM):
+        """LLM shim that intercepts transcripts, enqueues a LangGraph task, and yields no TTS."""
+        def __init__(self, outer: "RoxAgent", debounce_ms: int = 500):
+            super().__init__()
+            self._outer = outer
+            self._debounce_ms = debounce_ms
+            self._buffer: list[str] = []
+            self._debounce_handle: Optional[asyncio.TimerHandle] = None
+
+        def chat(self, *, chat_ctx: ChatContext = None, tools=None, tool_choice=None):  # noqa: D401
+            return self._chat_ctx_mgr(chat_ctx)
+
+        @asynccontextmanager
+        async def _chat_ctx_mgr(self, chat_ctx: ChatContext):  # noqa: D401
+            # Extract latest user transcript
+            transcript = ""
+            if chat_ctx:
+                messages = getattr(chat_ctx, "_items", [])
+                for msg in reversed(messages):
+                    role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else None)
+                    if str(role).lower() == "user":
+                        transcript = getattr(msg, "content", None) or (
+                            msg.get("content") if isinstance(msg, dict) else None
+                        )
+                        if isinstance(transcript, list):
+                            transcript = " ".join(map(str, transcript))
+                        transcript = str(transcript)
+                        break
+            if transcript:
+                self._buffer.append(transcript)
+                # reset debounce timer
+                if self._debounce_handle:
+                    self._debounce_handle.cancel()
+                loop = asyncio.get_event_loop()
+                self._debounce_handle = loop.call_later(self._debounce_ms / 1000.0, lambda: asyncio.create_task(self._flush()))
+            # Yield a single empty chunk so that AgentSession does not trigger TTS.
+            try:
+                yield self._stream_empty()
+            finally:
+                pass
+
+        async def _flush(self):
+            if not self._buffer:
+                return
+            bundled_transcript = " ".join(self._buffer).strip()
+            self._buffer.clear()
+            await self._outer.trigger_langgraph_task(
+                task_name="speaking_turn",
+                json_payload=json.dumps({"transcript": bundled_transcript}),
+                caller_identity="",
+            )
+
+        async def _stream_empty(self):
+            yield ChatChunk(id=str(uuid.uuid4()), delta=ChoiceDelta(role="assistant", content=""))
+
     def __init__(self, **kwargs):
         # Set default instructions if not provided, to satisfy Agent base class
         kwargs.setdefault(
@@ -112,6 +165,8 @@ class RoxAgent(Agent):
         self.transcript_queue: asyncio.Queue[str] = asyncio.Queue() # Add this back!
         self._room: Optional[rtc.Room] = None
         self._job_ctx: Optional[JobContext] = None
+        # LLM interceptor instance
+        self.llm_interceptor = RoxAgent.TranscriptInterceptor(self)
 
     # Add this back from Opinion 2's code
     def on_transcript(self, transcript: str, participant: rtc.RemoteParticipant, is_final: bool):
@@ -133,59 +188,6 @@ class RoxAgent(Agent):
             # Non-blocking enqueue; Queue is unbounded by default.
             self.transcript_queue.put_nowait(transcript)
 
-    async def handle_listen_and_stream(self, caller_identity: str):
-        """Reactive listen that commits the user turn after a silence gap."""
-        logger.info("Reactive listen initiated – STT->LLM streaming active.")
-
-        # Notify UI that we are listening
-        await trigger_client_ui_action(
-            self._room,
-            caller_identity,
-            "START_LISTENING_VISUAL",
-            {},
-        )
-
-        # Parameters
-        silence_gap_s = float(os.getenv("REACTIVE_LISTEN_SILENCE_GAP_S", "1.0"))
-        poll_interval_s = 0.1
-        last_speaking_ts: Optional[float] = None
-
-        logger.debug(
-            "Reactive listen loop starting (silence_gap=%ss poll=%ss)",
-            silence_gap_s,
-            poll_interval_s,
-        )
-
-        # Wait until the user has stopped speaking for `silence_gap_s` seconds
-        while True:
-            await asyncio.sleep(poll_interval_s)
-            user_state = self.agent_session.user_state if self.agent_session else None
-            if user_state == "speaking":
-                last_speaking_ts = time.time()
-                logger.debug("User speaking… resetting silence timer (ts=%s)", last_speaking_ts)
-            elif last_speaking_ts is None:
-                # Haven't heard the user yet; keep waiting
-                continue
-            elif (time.time() - last_speaking_ts) >= silence_gap_s:
-                logger.debug("Silence gap exceeded (%.2fs ≥ %.2fs). Committing user turn.",
-                             time.time() - last_speaking_ts,
-                             silence_gap_s)
-                break
-
-        try:
-            self.agent_session.commit_user_turn()
-            logger.info("User turn committed to AgentSession – STT transcript handed to LLM.")
-        except Exception as e:
-            logger.error("Failed to commit user turn: %s", e, exc_info=True)
-
-        # Notify UI that listening has ended
-        await trigger_client_ui_action(
-            self._room,
-            caller_identity,
-            "STOP_LISTENING_VISUAL",
-            {},
-        )
-
     async def speak_text(self, text: str):
         # A simple helper for one-off speech
         if self.agent_session:
@@ -193,65 +195,92 @@ class RoxAgent(Agent):
 
 
     async def wait_for_user_transcript(self, listen_config: dict, caller_identity: str) -> Optional[str]:
-        """
-        An "Active Listener" that cleans up stale data and uses a more patient timeout.
-        """
-        # FIX 1: Increase the silence timeout to be more forgiving of network latency.
-        # 2.0 seconds was too short. 3.0 is a much safer default.
-        silence_timeout = listen_config.get("silence_timeout_s", 5.0) 
-    
-        logger.info(f"Active Listener starting. Silence timeout: {silence_timeout}s")
+        """Wait until the user finishes speaking and return the collected transcript.
 
-    # FIX 2: Perform queue hygiene. Empty any stale transcripts from a previous,
-    # timed-out listen attempt before we start waiting for the new one.
+        Behavioural contract:
+        1. A *silence timeout* (`silence_timeout_s`) resets every time fresh STT
+           text arrives.  When no new transcript is received for that period we
+           assume the user has stopped speaking.
+        2. A *hard cap* (`max_turn_duration_s`) prevents the listener from
+           waiting forever in extremely noisy environments or if STT glitches.
+        3. Stale text left over from a previous turn is discarded before each
+           listen cycle to avoid cross-contamination.
+        """
+        silence_timeout = float(listen_config.get("silence_timeout_s", 5.0))
+        max_turn_duration = float(listen_config.get("max_turn_duration_s", 30.0))
+        logger.info(
+            "Active listener starting – silence_timeout=%ss, max_turn_duration=%ss",
+            silence_timeout,
+            max_turn_duration,
+        )
+
+        # --- Queue hygiene -------------------------------------------------
+        drained = 0
         while not self.transcript_queue.empty():
-            stale_transcript = self.transcript_queue.get_nowait()
-            logger.warning(f"Discarding stale transcript from queue: '{stale_transcript}'")
+            _ = self.transcript_queue.get_nowait()
+            drained += 1
+        if drained:
+            logger.debug("Discarded %d stale transcript chunks from previous turn", drained)
 
-        # Send the UI action to show we're listening
+        # Tell UI we are now listening
         await trigger_client_ui_action(
             self._room,
             caller_identity,
             "START_LISTENING_VISUAL",
-            {}
+            {},
         )
 
-        full_transcript = ""
-        while True:
-            try:
-                new_chunk = await asyncio.wait_for(
-                    self.transcript_queue.get(),
-                    timeout=silence_timeout
-                )
-                full_transcript += f" {new_chunk}"
-            
-            # (Optional but good) De-dupe the queue if multiple chunks arrive at once
-                while not self.transcript_queue.empty():
-                    full_transcript += f" {self.transcript_queue.get_nowait()}"
+        collected: list[str] = []
+        start_ts = time.monotonic()
+        last_rx_ts = start_ts
 
-            except asyncio.TimeoutError:
-                logger.info("Active listener timed out. User has finished speaking.")
+        while True:
+            remaining_overall = max_turn_duration - (time.monotonic() - start_ts)
+            if remaining_overall <= 0:
+                logger.warning("max_turn_duration reached while listening – forcing stop")
                 break
 
-        full_transcript = full_transcript.strip()
+            timeout = min(silence_timeout, remaining_overall)
+            try:
+                chunk = await asyncio.wait_for(self.transcript_queue.get(), timeout=timeout)
+                if chunk.strip():
+                    collected.append(chunk)
+                    last_rx_ts = time.monotonic()
 
-        # Tell the UI we're done listening
+                    # Drain any burst of queued items without awaiting again
+                    while not self.transcript_queue.empty():
+                        burst_chunk = self.transcript_queue.get_nowait()
+                        if burst_chunk.strip():
+                            collected.append(burst_chunk)
+                            last_rx_ts = time.monotonic()
+            except asyncio.TimeoutError:
+                # Timed-out waiting for a new chunk → user finished speaking if
+                # we have been silent longer than silence_timeout.
+                if (time.monotonic() - last_rx_ts) >= silence_timeout:
+                    logger.debug("Silence timeout reached – stopping listener")
+                    break
+                # else: corner-case where max_turn_duration guided the timeout –
+                # loop will exit next iteration.
+
+        transcript = " ".join(collected).strip()
+
+        # Notify UI we have stopped listening
         await trigger_client_ui_action(
             self._room,
             caller_identity,
-        "STOP_LISTENING_VISUAL",
-        {}
-    )
+            "STOP_LISTENING_VISUAL",
+            {},
+        )
 
-        if full_transcript:
-            logger.info(f"Final collected transcript: '{full_transcript}'")
-            return full_transcript
-        else:
-            logger.info("No speech was detected during the listening window.")
-            prompt = listen_config.get("prompt_if_silent")
-            if prompt:
-                await self.speak_text(prompt)
-            return None
+        if transcript:
+            logger.info("Collected user transcript: '%s'", transcript)
+            return transcript
+
+        logger.info("No speech detected during listening window")
+        if prompt := listen_config.get("prompt_if_silent"):
+            await self.speak_text(prompt)
+        return None
+
     async def handle_speak_then_listen(self, parameters: dict, caller_identity: str):
         logger.info(f"Handling SPEAK_THEN_LISTEN for {caller_identity}")
         text_to_speak = parameters.get("text_to_speak")
@@ -358,39 +387,45 @@ class RoxAgent(Agent):
     async def processing_loop(self):
         logger.info("Agent's main processing loop started.")
         while True:
-            task_name, json_payload, caller_identity = await self.task_queue.get()
-            
-            # Here you would fetch the plan from LangGraph
-            # For this example, let's assume `plan` is the parsed JSON response
-            
-            # A mock `plan` for demonstration
-            # In reality, you'd make the aiohttp call to LangGraph here
-            langgraph_plan = await self.fetch_plan_from_langgraph(task_name, json_payload)
+            try:
+                task_name, json_payload, caller_identity = await self.task_queue.get()
 
-            if not langgraph_plan or not langgraph_plan.get("final_ui_actions"):
-                continue
+                # Fetch execution plan from LangGraph
+                langgraph_plan = await self.fetch_plan_from_langgraph(task_name, json_payload)
+                if not langgraph_plan:
+                    continue
 
-            # Process all actions in the plan
-            for action in langgraph_plan["final_ui_actions"]:
-                action_type = action.get("action_type")
-                parameters = action.get("parameters", {})
+                logger.info(f"Received LangGraph plan: {langgraph_plan}")
 
-                if action_type == "SPEAK_THEN_LISTEN":
-                # Reactive: speak (if needed) then rely on STT->LLM streaming
-                    text_to_speak = parameters.get("text_to_speak") or parameters.get("text")
-                    if text_to_speak:
-                        logger.info("Reactive SPEAK_THEN_LISTEN: speaking then entering streaming listen mode.")
-                        await self.agent_session.say(text_to_speak, allow_interruptions=True)
-                    await self.handle_listen_and_stream(caller_identity)
-                elif action_type == "LISTEN_AND_STREAM_TO_LLM":
-                # Legacy queued behaviour: collect transcript then process
-                    await self.handle_speak_then_listen(parameters, caller_identity)
-                elif action_type == "SPEAK_TEXT": # For simple, non-interactive speech
-                    await self.speak_text(parameters.get("text", ""))
-                else: # For all other simple UI actions
-                    await trigger_client_ui_action(
-                        self._room, caller_identity, action_type, parameters
-                    )
+                # Shortcut: if LG plan simply contains text_for_tts, speak it directly
+                text_to_speak = langgraph_plan.get("text_for_tts")
+                if text_to_speak:
+                    await self.speak_text(text_to_speak)
+                    # still fall through to any ui actions if present
+
+                if not langgraph_plan.get("final_ui_actions"):
+                    continue
+
+                # Execute all actions in the plan
+                for action in langgraph_plan["final_ui_actions"]:
+                    action_type = action.get("action_type")
+                    parameters = action.get("parameters", {})
+
+                    try:
+                        if action_type == "SPEAK_THEN_LISTEN":
+                            await self.handle_speak_then_listen(parameters, caller_identity)
+                        elif action_type == "SPEAK_TEXT":
+                            await self.speak_text(parameters.get("text", ""))
+                        elif action_type in {"SHOW_HTML", "SET_AVATAR_EXPRESSION"}:
+                            await trigger_client_ui_action(self._room, caller_identity, action_type, parameters)
+                        else:
+                            logger.warning("Unknown action_type '%s', forwarding to UI layer.", action_type)
+                            await trigger_client_ui_action(self._room, caller_identity, action_type, parameters)
+                    except Exception as action_err:
+                        logger.error("Error executing action '%s': %s", action_type, action_err, exc_info=True)
+            except Exception as loop_err:
+                logger.exception("Processing loop recovered from unexpected error: %s", loop_err)
+                await asyncio.sleep(1)
 
 
 async def entrypoint(ctx: JobContext):
@@ -414,11 +449,10 @@ async def entrypoint(ctx: JobContext):
     rox_agent_instance._room = ctx.room
     
     # Instantiate minimal LLM bridge that forwards transcripts to the FastAPI backend.
-    llm_bridge = CustomLLMBridge()
 
     main_agent_session = agents.AgentSession(  # Renamed for clarity
         stt=deepgram.STT(model="nova-2", language="multi"),  # nova-2 or nova-3
-        llm=llm_bridge,
+        llm=rox_agent_instance.llm_interceptor,
         tts=deepgram.TTS(model="aura-asteria-en", api_key=os.environ.get("DEEPGRAM_API_KEY")),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
