@@ -9,7 +9,6 @@ import logging
 import argparse
 import asyncio
 import json
-import time  # Added for silence-gap measurement
 import uuid
 import base64
 from pathlib import Path
@@ -99,7 +98,7 @@ async def trigger_client_ui_action(
 
 class RoxAgent(Agent):
     class TranscriptInterceptor(LLM):
-        """LLM shim that intercepts transcripts, enqueues a LangGraph task, and yields no TTS."""
+        """LLM shim that intercepts user speech, enqueues a LangGraph task, and yields no TTS."""
         def __init__(self, outer: "RoxAgent", debounce_ms: int = 500):
             super().__init__()
             self._outer = outer
@@ -144,11 +143,16 @@ class RoxAgent(Agent):
                 return
             bundled_transcript = " ".join(self._buffer).strip()
             self._buffer.clear()
+            # Queue the task as before
             await self._outer.trigger_langgraph_task(
                 task_name="speaking_turn",
                 json_payload=json.dumps({"transcript": bundled_transcript}),
-                caller_identity="",
+                caller_identity="",  # TODO: You need a way to get the identity here
             )
+
+            # Signal that speech has happened to unblock handle_speak_then_listen
+            if hasattr(self._outer, 'user_spoke_event'):
+                self._outer.user_spoke_event.set()
 
         async def _stream_empty(self):
             yield ChatChunk(id=str(uuid.uuid4()), delta=ChoiceDelta(role="assistant", content=""))
@@ -162,175 +166,63 @@ class RoxAgent(Agent):
         super().__init__(**kwargs)
         self.task_queue: asyncio.Queue[tuple] = asyncio.Queue()
         self.agent_session: Optional[agents.AgentSession] = None
-        self.transcript_queue: asyncio.Queue[str] = asyncio.Queue() # Add this back!
+        self.user_spoke_event = asyncio.Event()
         self._room: Optional[rtc.Room] = None
         self._job_ctx: Optional[JobContext] = None
         # LLM interceptor instance
         self.llm_interceptor = RoxAgent.TranscriptInterceptor(self)
-
-    # Add this back from Opinion 2's code
-    def on_transcript(self, transcript: str, participant: rtc.RemoteParticipant, is_final: bool):
-        """
-        Callback fired by AgentSession whenever STT produces a transcript.
-        AgentSession invokes this *synchronously*, so the handler itself must be
-        synchronous; otherwise the coroutine would never be awaited and the
-        body would not run. We therefore enqueue the transcript with
-        `put_nowait`.
-        """
-        # Ignore empty strings that some STT engines emit.
-        if transcript.strip():
-            logger.info(
-                "Transcript received from %s: '%s' (is_final=%s)",
-                participant.identity,
-                transcript,
-                is_final,
-            )
-            # Non-blocking enqueue; Queue is unbounded by default.
-            self.transcript_queue.put_nowait(transcript)
 
     async def speak_text(self, text: str):
         # A simple helper for one-off speech
         if self.agent_session:
             await self.agent_session.say(text, allow_interruptions=False) # Don't allow interruptions for small prompts
 
-
-    async def wait_for_user_transcript(self, listen_config: dict, caller_identity: str) -> Optional[str]:
-        """Wait until the user finishes speaking and return the collected transcript.
-
-        Behavioural contract:
-        1. A *silence timeout* (`silence_timeout_s`) resets every time fresh STT
-           text arrives.  When no new transcript is received for that period we
-           assume the user has stopped speaking.
-        2. A *hard cap* (`max_turn_duration_s`) prevents the listener from
-           waiting forever in extremely noisy environments or if STT glitches.
-        3. Stale text left over from a previous turn is discarded before each
-           listen cycle to avoid cross-contamination.
-        """
-        silence_timeout = float(listen_config.get("silence_timeout_s", 5.0))
-        max_turn_duration = float(listen_config.get("max_turn_duration_s", 30.0))
-        logger.info(
-            "Active listener starting – silence_timeout=%ss, max_turn_duration=%ss",
-            silence_timeout,
-            max_turn_duration,
-        )
-
-        # --- Queue hygiene -------------------------------------------------
-        drained = 0
-        while not self.transcript_queue.empty():
-            _ = self.transcript_queue.get_nowait()
-            drained += 1
-        if drained:
-            logger.debug("Discarded %d stale transcript chunks from previous turn", drained)
-
-        # Tell UI we are now listening
-        await trigger_client_ui_action(
-            self._room,
-            caller_identity,
-            "START_LISTENING_VISUAL",
-            {},
-        )
-
-        collected: list[str] = []
-        start_ts = time.monotonic()
-        last_rx_ts = start_ts
-
-        while True:
-            remaining_overall = max_turn_duration - (time.monotonic() - start_ts)
-            if remaining_overall <= 0:
-                logger.warning("max_turn_duration reached while listening – forcing stop")
-                break
-
-            timeout = min(silence_timeout, remaining_overall)
-            try:
-                chunk = await asyncio.wait_for(self.transcript_queue.get(), timeout=timeout)
-                if chunk.strip():
-                    collected.append(chunk)
-                    last_rx_ts = time.monotonic()
-
-                    # Drain any burst of queued items without awaiting again
-                    while not self.transcript_queue.empty():
-                        burst_chunk = self.transcript_queue.get_nowait()
-                        if burst_chunk.strip():
-                            collected.append(burst_chunk)
-                            last_rx_ts = time.monotonic()
-            except asyncio.TimeoutError:
-                # Timed-out waiting for a new chunk → user finished speaking if
-                # we have been silent longer than silence_timeout.
-                if (time.monotonic() - last_rx_ts) >= silence_timeout:
-                    logger.debug("Silence timeout reached – stopping listener")
-                    break
-                # else: corner-case where max_turn_duration guided the timeout –
-                # loop will exit next iteration.
-
-        transcript = " ".join(collected).strip()
-
-        # Notify UI we have stopped listening
-        await trigger_client_ui_action(
-            self._room,
-            caller_identity,
-            "STOP_LISTENING_VISUAL",
-            {},
-        )
-
-        if transcript:
-            logger.info("Collected user transcript: '%s'", transcript)
-            return transcript
-
-        logger.info("No speech detected during listening window")
-        if prompt := listen_config.get("prompt_if_silent"):
-            await self.speak_text(prompt)
-        return None
-
     async def handle_speak_then_listen(self, parameters: dict, caller_identity: str):
-        logger.info(f"Handling SPEAK_THEN_LISTEN for {caller_identity}")
         text_to_speak = parameters.get("text_to_speak")
         listen_config = parameters.get("listen_config", {})
+        timeout_s = listen_config.get("silence_timeout_s", 7.0)
+        prompt_if_silent = listen_config.get("prompt_if_silent")
 
         try:
-            if text_to_speak:
-                logger.info("Speaking with interruptions enabled.")
+            # Speak the text
+            if text_to_speak and self.agent_session:
                 await self.agent_session.say(text_to_speak, allow_interruptions=True)
 
-            logger.info("Speech completed naturally. Now listening.")
-            transcript = await self.wait_for_user_transcript(listen_config, caller_identity)
+            # Now, wait for the user. We do this by waiting for the llm_interceptor to do its job.
+            self.user_spoke_event.clear() # Reset the event before listening
 
-            if transcript:
-                logger.info(f"User responded: {transcript}. Triggering 'handle_student_response'.")
-                await self.trigger_langgraph_task(
-                    task_name="handle_student_response",
-                    json_payload=json.dumps({"transcript": transcript}),
-                    caller_identity=caller_identity
-                )
-            else:
-                logger.info("User was silent after speech. Triggering 'handle_student_silence'.")
-                await self.trigger_langgraph_task(
-                    task_name="handle_student_silence",
-                    json_payload=json.dumps({"speech_id": parameters.get("speech_id")}),
-                    caller_identity=caller_identity
-                )
+            # Tell frontend we are listening
+            await trigger_client_ui_action(self._room, caller_identity, "START_LISTENING_VISUAL", {})
 
-        # --- THIS IS THE CORRECTED EXCEPTION NAME ---
+            try:
+                await asyncio.wait_for(self.user_spoke_event.wait(), timeout=timeout_s)
+                # If we get here, it means the interceptor fired and set the event.
+                logger.info("Listen successful: user spoke and task was queued by interceptor.")
+            except asyncio.TimeoutError:
+                logger.info("Listen timed out. User was silent.")
+                # If silent, queue a task to handle the silence.
+                if prompt_if_silent:
+                    await self.trigger_langgraph_task(
+                        task_name="handle_student_silence",
+                        json_payload=json.dumps({"prompt_to_speak": prompt_if_silent}),
+                        caller_identity=caller_identity
+                    )
+            finally:
+                await trigger_client_ui_action(self._room, caller_identity, "STOP_LISTENING_VISUAL", {})
+
         except agents.tts.TTSCancelled:
-            logger.warning("HANDLED INTERRUPT: Speech was cancelled by user.")
-            
+            logger.warning("Speech was cancelled by user – entering interruption flow.")
             await self.speak_text("Of course, what's on your mind?")
-            user_doubt = await self.wait_for_user_transcript({}, caller_identity)
 
-            if not user_doubt:
-                logger.info("User interrupted but said nothing. Ending this flow.")
-                return
-
-            context = {
-                "text_that_was_being_spoken": text_to_speak,
-                "user_doubt": user_doubt
-            }
-
-            logger.info("Triggering 'resolve_student_doubt' for LangGraph.")
-            await self.trigger_langgraph_task(
-                task_name="resolve_student_doubt",
-                json_payload=json.dumps(context),
-                caller_identity=caller_identity
-            )
+            # Reset event and listen again
+            self.user_spoke_event.clear()
+            await trigger_client_ui_action(self._room, caller_identity, "START_LISTENING_VISUAL", {})
+            try:
+                await asyncio.wait_for(self.user_spoke_event.wait(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                logger.info("User provided no follow-up after interrupt.")
+            finally:
+                await trigger_client_ui_action(self._room, caller_identity, "STOP_LISTENING_VISUAL", {})
 
     async def trigger_langgraph_task(self, task_name: str, json_payload: str, caller_identity: str):
         """Puts a new task onto the agent's processing queue."""
