@@ -29,6 +29,7 @@ if _version_not_supported:
 
 class AgentInteractionStub(object):
     """Service the agent will implement (called by frontend)
+
     """
 
     def __init__(self, channel):
@@ -62,14 +63,21 @@ class AgentInteractionStub(object):
                 request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
                 response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
                 _registered_method=True)
+        self.HandlePushToTalk = channel.unary_unary(
+                '/rox.interaction.AgentInteraction/HandlePushToTalk',
+                request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
+                response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
+                _registered_method=True)
 
 
 class AgentInteractionServicer(object):
     """Service the agent will implement (called by frontend)
+
     """
 
     def InvokeAgentTask(self, request, context):
         """+++ ADD THIS NEW UNIVERSAL RPC +++
+
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -77,6 +85,7 @@ class AgentInteractionServicer(object):
 
     def HandleFrontendButton(self, request, context):
         """Changed to accept RpcInvocationData and return StringValue (base64 encoded AgentResponse)
+
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -84,6 +93,7 @@ class AgentInteractionServicer(object):
 
     def NotifyPageLoad(self, request, context):
         """Old one, kept for reference or if used elsewhere. Remove if V2 fully replaces it.
+
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -91,6 +101,7 @@ class AgentInteractionServicer(object):
 
     def NotifyPageLoadV2(self, request, context):
         """Method frontend is calling, signature aligned with Python service style
+
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -98,7 +109,14 @@ class AgentInteractionServicer(object):
 
     def TestPing(self, request, context):
         """TestPing method
+
         """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def HandlePushToTalk(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -131,6 +149,11 @@ def add_AgentInteractionServicer_to_server(servicer, server):
                     request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
                     response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
             ),
+            'HandlePushToTalk': grpc.unary_unary_rpc_method_handler(
+                    servicer.HandlePushToTalk,
+                    request_deserializer=interaction__pb2.RpcInvocationData.FromString,
+                    response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'rox.interaction.AgentInteraction', rpc_method_handlers)
@@ -141,6 +164,7 @@ def add_AgentInteractionServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class AgentInteraction(object):
     """Service the agent will implement (called by frontend)
+
     """
 
     @staticmethod
@@ -278,9 +302,37 @@ class AgentInteraction(object):
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def HandlePushToTalk(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/rox.interaction.AgentInteraction/HandlePushToTalk',
+            interaction__pb2.RpcInvocationData.SerializeToString,
+            google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class ClientSideUIStub(object):
     """Service the CLIENT will implement, and the AGENT will call
+
     """
 
     def __init__(self, channel):
@@ -298,6 +350,7 @@ class ClientSideUIStub(object):
 
 class ClientSideUIServicer(object):
     """Service the CLIENT will implement, and the AGENT will call
+
     """
 
     def PerformUIAction(self, request, context):
@@ -324,6 +377,7 @@ def add_ClientSideUIServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class ClientSideUI(object):
     """Service the CLIENT will implement, and the AGENT will call
+
     """
 
     @staticmethod

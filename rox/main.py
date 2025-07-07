@@ -345,7 +345,7 @@ async def entrypoint(ctx: JobContext):
     main_agent_session = agents.AgentSession(  # Renamed for clarity
         stt=deepgram.STT(model="nova-2", language="multi"),  # nova-2 or nova-3
         llm=rox_agent_instance.llm_interceptor,
-        tts=deepgram.TTS(model="aura-asteria-en", api_key=os.environ.get("DEEPGRAM_API_KEY")),
+        tts=deepgram.TTS(model="aura-2-helena-en", api_key=os.environ.get("DEEPGRAM_API_KEY")),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
