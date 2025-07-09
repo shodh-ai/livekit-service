@@ -139,20 +139,33 @@ class RoxAgent(Agent):
                 pass
 
         async def _flush(self):
-            if not self._buffer:
-                return
-            bundled_transcript = " ".join(self._buffer).strip()
+            full_transcript = " ".join(self._buffer)
             self._buffer.clear()
-            # Queue the task as before
-            await self._outer.trigger_langgraph_task(
-                task_name="speaking_turn",
-                json_payload=json.dumps({"transcript": bundled_transcript}),
-                caller_identity="",  # TODO: You need a way to get the identity here
-            )
+            logger.info(f"Intercepted transcript: {full_transcript}")
 
-            # Signal that speech has happened to unblock handle_speak_then_listen
-            if hasattr(self._outer, 'user_spoke_event'):
-                self._outer.user_spoke_event.set()
+            # Read the context name that was set by handle_speak_then_listen
+            task_name = self._outer.next_turn_context_name
+
+            if not task_name or task_name == "GENERAL_CONVERSATION_TURN":
+                 logger.warning(f"No specific context set for this turn. Routing to generic handler.")
+                 # Fallback to a generic task if needed
+                 task_name = "handle_student_response"
+
+            turn_payload = {
+                "transcript": full_transcript,
+                "current_context": {
+                    "user_id": self._outer.user_id,
+                    "session_id": self._outer.session_id,
+                    "task_stage": task_name # Pass the context as the task_stage
+                }
+            }
+            
+            # The task_name now correctly reflects the flow we're in
+            await self._outer.trigger_langgraph_task(
+                task_name=task_name,
+                json_payload=json.dumps(turn_payload),
+                caller_identity=self._outer.caller_identity
+            )
 
         async def _stream_empty(self):
             yield ChatChunk(id=str(uuid.uuid4()), delta=ChoiceDelta(role="assistant", content=""))
@@ -172,6 +185,15 @@ class RoxAgent(Agent):
         # LLM interceptor instance
         self.llm_interceptor = RoxAgent.TranscriptInterceptor(self)
 
+        # --- ADD THESE LINES ---
+        # These attributes will be set by the RPC service.
+        self.user_id: Optional[str] = None
+        self.session_id: Optional[str] = None
+        self.caller_identity: Optional[str] = None
+        self.agent_context: Dict[str, Any] = {} # For dynamic routing from frontend
+        self.next_turn_context_name: str = "GENERAL_CONVERSATION_TURN"
+        # --- END OF ADDED LINES ---
+
     async def speak_text(self, text: str):
         # A simple helper for one-off speech
         if self.agent_session:
@@ -183,50 +205,36 @@ class RoxAgent(Agent):
         timeout_s = listen_config.get("silence_timeout_s", 7.0)
         prompt_if_silent = listen_config.get("prompt_if_silent")
 
+        # Before listening, store the context that LangGraph provided for the NEXT turn.
+        # If it's not provided, fall back to a generic name.
+        self.next_turn_context_name = listen_config.get("context_for_next_turn", "GENERAL_CONVERSATION_TURN")
+        logger.info(f"Agent is now listening. Next user speech will be handled as: '{self.next_turn_context_name}'")
+
         try:
-            # Speak the text
             if text_to_speak and self.agent_session:
-                await self.agent_session.say(text_to_speak, allow_interruptions=True)
+                await self.agent_session.say(text_to_speak, allow_interruptions=False)
 
-            # Now, wait for the user. We do this by waiting for the llm_interceptor to do its job.
-            self.user_spoke_event.clear() # Reset the event before listening
-
-            # Tell frontend we are listening
-            await trigger_client_ui_action(self._room, caller_identity, "START_LISTENING_VISUAL", {})
-
-            try:
-                await asyncio.wait_for(self.user_spoke_event.wait(), timeout=timeout_s)
-                # If we get here, it means the interceptor fired and set the event.
-                logger.info("Listen successful: user spoke and task was queued by interceptor.")
-            except asyncio.TimeoutError:
-                logger.info("Listen timed out. User was silent.")
-                # If silent, queue a task to handle the silence.
-                if prompt_if_silent:
-                    await self.trigger_langgraph_task(
-                        task_name="handle_student_silence",
-                        json_payload=json.dumps({"prompt_to_speak": prompt_if_silent}),
-                        caller_identity=caller_identity
-                    )
-            finally:
-                await trigger_client_ui_action(self._room, caller_identity, "STOP_LISTENING_VISUAL", {})
-
-        except agents.tts.TTSCancelled:
-            logger.warning("Speech was cancelled by user – entering interruption flow.")
-            await self.speak_text("Of course, what's on your mind?")
-
-            # Reset event and listen again
             self.user_spoke_event.clear()
             await trigger_client_ui_action(self._room, caller_identity, "START_LISTENING_VISUAL", {})
-            try:
-                await asyncio.wait_for(self.user_spoke_event.wait(), timeout=timeout_s)
-            except asyncio.TimeoutError:
-                logger.info("User provided no follow-up after interrupt.")
-            finally:
-                await trigger_client_ui_action(self._room, caller_identity, "STOP_LISTENING_VISUAL", {})
+
+            await asyncio.wait_for(self.user_spoke_event.wait(), timeout=timeout_s)
+            logger.info("Listen successful: user spoke and task was queued by interceptor.")
+
+        except asyncio.TimeoutError:
+            logger.warning("Listen timed out: user did not speak.")
+            # If a silent prompt was provided, say it.
+            if prompt_if_silent:
+                await self.speak_text(prompt_if_silent)
+
+        except agents.llm.LLMStreamInterrupted:
+            logger.info("TTS was cancelled by user interrupt.")
+
+        finally:
+            await trigger_client_ui_action(self._room, caller_identity, "STOP_LISTENING_VISUAL", {})
 
     async def trigger_langgraph_task(self, task_name: str, json_payload: str, caller_identity: str):
         """Puts a new task onto the agent's processing queue."""
-        logger.info(f"Queueing LangGraph task: '{task_name}' for user '{caller_identity}'.")
+        logger.info(f"Queueing LangGraph task: '{task_name}' for user '{self.user_id}'.")
         await self.task_queue.put((task_name, json_payload, caller_identity))
 
     async def fetch_plan_from_langgraph(self, task_name: str, json_payload: str) -> Optional[dict]:
