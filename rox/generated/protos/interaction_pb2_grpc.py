@@ -38,9 +38,24 @@ class AgentInteractionStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.InvokeAgentTask = channel.unary_unary(
+        self.InvokeAgentTask = channel.unary_stream(
                 '/rox.interaction.AgentInteraction/InvokeAgentTask',
                 request_serializer=interaction__pb2.InvokeAgentTaskRequest.SerializeToString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
+                _registered_method=True)
+        self.RequestInterrupt = channel.unary_unary(
+                '/rox.interaction.AgentInteraction/RequestInterrupt',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
+                _registered_method=True)
+        self.TestPing = channel.unary_unary(
+                '/rox.interaction.AgentInteraction/TestPing',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
+                _registered_method=True)
+        self.UpdateAgentContext = channel.unary_unary(
+                '/rox.interaction.AgentInteraction/UpdateAgentContext',
+                request_serializer=interaction__pb2.UpdateAgentContextRequest.SerializeToString,
                 response_deserializer=interaction__pb2.AgentResponse.FromString,
                 _registered_method=True)
         self.HandleFrontendButton = channel.unary_unary(
@@ -58,11 +73,6 @@ class AgentInteractionStub(object):
                 request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
                 response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
                 _registered_method=True)
-        self.TestPing = channel.unary_unary(
-                '/rox.interaction.AgentInteraction/TestPing',
-                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-                response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
-                _registered_method=True)
         self.HandlePushToTalk = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/HandlePushToTalk',
                 request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
@@ -76,41 +86,43 @@ class AgentInteractionServicer(object):
     """
 
     def InvokeAgentTask(self, request, context):
-        """+++ ADD THIS NEW UNIVERSAL RPC +++
-
-        """
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def HandleFrontendButton(self, request, context):
-        """Changed to accept RpcInvocationData and return StringValue (base64 encoded AgentResponse)
-
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def NotifyPageLoad(self, request, context):
-        """Old one, kept for reference or if used elsewhere. Remove if V2 fully replaces it.
-
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def NotifyPageLoadV2(self, request, context):
-        """Method frontend is calling, signature aligned with Python service style
-
-        """
+    def RequestInterrupt(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def TestPing(self, request, context):
-        """TestPing method
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
-        """
+    def UpdateAgentContext(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def HandleFrontendButton(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def NotifyPageLoad(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def NotifyPageLoadV2(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -124,9 +136,24 @@ class AgentInteractionServicer(object):
 
 def add_AgentInteractionServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'InvokeAgentTask': grpc.unary_unary_rpc_method_handler(
+            'InvokeAgentTask': grpc.unary_stream_rpc_method_handler(
                     servicer.InvokeAgentTask,
                     request_deserializer=interaction__pb2.InvokeAgentTaskRequest.FromString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
+            ),
+            'RequestInterrupt': grpc.unary_unary_rpc_method_handler(
+                    servicer.RequestInterrupt,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
+            ),
+            'TestPing': grpc.unary_unary_rpc_method_handler(
+                    servicer.TestPing,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
+            ),
+            'UpdateAgentContext': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateAgentContext,
+                    request_deserializer=interaction__pb2.UpdateAgentContextRequest.FromString,
                     response_serializer=interaction__pb2.AgentResponse.SerializeToString,
             ),
             'HandleFrontendButton': grpc.unary_unary_rpc_method_handler(
@@ -142,11 +169,6 @@ def add_AgentInteractionServicer_to_server(servicer, server):
             'NotifyPageLoadV2': grpc.unary_unary_rpc_method_handler(
                     servicer.NotifyPageLoadV2,
                     request_deserializer=interaction__pb2.RpcInvocationData.FromString,
-                    response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
-            ),
-            'TestPing': grpc.unary_unary_rpc_method_handler(
-                    servicer.TestPing,
-                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
                     response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
             ),
             'HandlePushToTalk': grpc.unary_unary_rpc_method_handler(
@@ -178,11 +200,92 @@ class AgentInteraction(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(
+        return grpc.experimental.unary_stream(
             request,
             target,
             '/rox.interaction.AgentInteraction/InvokeAgentTask',
             interaction__pb2.InvokeAgentTaskRequest.SerializeToString,
+            interaction__pb2.AgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RequestInterrupt(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/rox.interaction.AgentInteraction/RequestInterrupt',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            interaction__pb2.AgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def TestPing(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/rox.interaction.AgentInteraction/TestPing',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            interaction__pb2.AgentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateAgentContext(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/rox.interaction.AgentInteraction/UpdateAgentContext',
+            interaction__pb2.UpdateAgentContextRequest.SerializeToString,
             interaction__pb2.AgentResponse.FromString,
             options,
             channel_credentials,
@@ -264,33 +367,6 @@ class AgentInteraction(object):
             target,
             '/rox.interaction.AgentInteraction/NotifyPageLoadV2',
             interaction__pb2.RpcInvocationData.SerializeToString,
-            google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def TestPing(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/rox.interaction.AgentInteraction/TestPing',
-            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
             google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
             options,
             channel_credentials,

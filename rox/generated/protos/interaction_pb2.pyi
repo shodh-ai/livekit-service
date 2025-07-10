@@ -48,6 +48,7 @@ class ClientUIActionType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     START_LISTENING_VISUAL: _ClassVar[ClientUIActionType]
     STOP_LISTENING_VISUAL: _ClassVar[ClientUIActionType]
     DISPLAY_VISUAL_AID: _ClassVar[ClientUIActionType]
+    FETCH_AND_DISPLAY_COURSE_MAP: _ClassVar[ClientUIActionType]
     END_DOUBT_LISTENING_SESSION: _ClassVar[ClientUIActionType]
     START_DOUBT_LISTENING_SESSION: _ClassVar[ClientUIActionType]
     REPLACE_TEXT_RANGE: _ClassVar[ClientUIActionType]
@@ -88,6 +89,7 @@ PROMPT_FOR_USER_INPUT: ClientUIActionType
 START_LISTENING_VISUAL: ClientUIActionType
 STOP_LISTENING_VISUAL: ClientUIActionType
 DISPLAY_VISUAL_AID: ClientUIActionType
+FETCH_AND_DISPLAY_COURSE_MAP: ClientUIActionType
 END_DOUBT_LISTENING_SESSION: ClientUIActionType
 START_DOUBT_LISTENING_SESSION: ClientUIActionType
 REPLACE_TEXT_RANGE: ClientUIActionType
@@ -183,6 +185,12 @@ class InvokeAgentTaskRequest(_message.Message):
 class PushToTalkRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class UpdateAgentContextRequest(_message.Message):
+    __slots__ = ("json_context_payload",)
+    JSON_CONTEXT_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    json_context_payload: str
+    def __init__(self, json_context_payload: _Optional[str] = ...) -> None: ...
 
 class HighlightRangeProto(_message.Message):
     __slots__ = ("id", "start", "end", "type", "message", "wrong_version", "correct_version")
@@ -311,20 +319,10 @@ class RemarkProto(_message.Message):
     def __init__(self, id: _Optional[str] = ..., title: _Optional[str] = ..., content: _Optional[str] = ..., type: _Optional[str] = ...) -> None: ...
 
 class UpdateTextContentPayloadProto(_message.Message):
-    __slots__ = ("target_element_id", "text")
-    TARGET_ELEMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("text",)
     TEXT_FIELD_NUMBER: _ClassVar[int]
-    target_element_id: str
     text: str
-    def __init__(self, target_element_id: _Optional[str] = ..., text: _Optional[str] = ...) -> None: ...
-
-class StartListeningVisualPayloadProto(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
-
-class StopListeningVisualPayloadProto(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    def __init__(self, text: _Optional[str] = ...) -> None: ...
 
 class ReplaceTextRangePayloadProto(_message.Message):
     __slots__ = ("start", "end", "replacement")
@@ -337,7 +335,7 @@ class ReplaceTextRangePayloadProto(_message.Message):
     def __init__(self, start: _Optional[int] = ..., end: _Optional[int] = ..., replacement: _Optional[str] = ...) -> None: ...
 
 class AgentToClientUIActionRequest(_message.Message):
-    __slots__ = ("request_id", "action_type", "parameters", "highlight_ranges_payload", "suggest_text_edit_payload", "show_inline_suggestion_payload", "show_tooltip_or_comment_payload", "set_editor_content_payload", "append_text_to_editor_realtime_payload", "strikethrough_ranges_payload", "display_visual_aid_payload", "execute_conversational_sequence_payload", "display_remarks_list_payload", "update_text_content_payload", "replace_text_range_payload", "start_listening_visual_payload", "stop_listening_visual_payload")
+    __slots__ = ("request_id", "action_type", "target_element_id", "parameters", "highlight_ranges_payload", "suggest_text_edit_payload", "show_inline_suggestion_payload", "show_tooltip_or_comment_payload", "set_editor_content_payload", "append_text_to_editor_realtime_payload", "strikethrough_ranges_payload", "display_visual_aid_payload", "execute_conversational_sequence_payload", "display_remarks_list_payload", "update_text_content_payload", "replace_text_range_payload")
     class ParametersEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -347,6 +345,7 @@ class AgentToClientUIActionRequest(_message.Message):
         def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     ACTION_TYPE_FIELD_NUMBER: _ClassVar[int]
+    TARGET_ELEMENT_ID_FIELD_NUMBER: _ClassVar[int]
     PARAMETERS_FIELD_NUMBER: _ClassVar[int]
     HIGHLIGHT_RANGES_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     SUGGEST_TEXT_EDIT_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
@@ -360,10 +359,9 @@ class AgentToClientUIActionRequest(_message.Message):
     DISPLAY_REMARKS_LIST_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     UPDATE_TEXT_CONTENT_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     REPLACE_TEXT_RANGE_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
-    START_LISTENING_VISUAL_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
-    STOP_LISTENING_VISUAL_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     action_type: ClientUIActionType
+    target_element_id: str
     parameters: _containers.ScalarMap[str, str]
     highlight_ranges_payload: _containers.RepeatedCompositeFieldContainer[HighlightRangeProto]
     suggest_text_edit_payload: SuggestTextEditPayloadProto
@@ -377,9 +375,7 @@ class AgentToClientUIActionRequest(_message.Message):
     display_remarks_list_payload: DisplayRemarksListPayloadProto
     update_text_content_payload: UpdateTextContentPayloadProto
     replace_text_range_payload: ReplaceTextRangePayloadProto
-    start_listening_visual_payload: StartListeningVisualPayloadProto
-    stop_listening_visual_payload: StopListeningVisualPayloadProto
-    def __init__(self, request_id: _Optional[str] = ..., action_type: _Optional[_Union[ClientUIActionType, str]] = ..., parameters: _Optional[_Mapping[str, str]] = ..., highlight_ranges_payload: _Optional[_Iterable[_Union[HighlightRangeProto, _Mapping]]] = ..., suggest_text_edit_payload: _Optional[_Union[SuggestTextEditPayloadProto, _Mapping]] = ..., show_inline_suggestion_payload: _Optional[_Union[ShowInlineSuggestionPayloadProto, _Mapping]] = ..., show_tooltip_or_comment_payload: _Optional[_Union[ShowTooltipOrCommentPayloadProto, _Mapping]] = ..., set_editor_content_payload: _Optional[_Union[SetEditorContentPayloadProto, _Mapping]] = ..., append_text_to_editor_realtime_payload: _Optional[_Union[AppendTextToEditorRealtimePayloadProto, _Mapping]] = ..., strikethrough_ranges_payload: _Optional[_Iterable[_Union[StrikeThroughRangeProto, _Mapping]]] = ..., display_visual_aid_payload: _Optional[_Union[DisplayVisualAidPayloadProto, _Mapping]] = ..., execute_conversational_sequence_payload: _Optional[_Union[ExecuteConversationalSequencePayloadProto, _Mapping]] = ..., display_remarks_list_payload: _Optional[_Union[DisplayRemarksListPayloadProto, _Mapping]] = ..., update_text_content_payload: _Optional[_Union[UpdateTextContentPayloadProto, _Mapping]] = ..., replace_text_range_payload: _Optional[_Union[ReplaceTextRangePayloadProto, _Mapping]] = ..., start_listening_visual_payload: _Optional[_Union[StartListeningVisualPayloadProto, _Mapping]] = ..., stop_listening_visual_payload: _Optional[_Union[StopListeningVisualPayloadProto, _Mapping]] = ...) -> None: ...
+    def __init__(self, request_id: _Optional[str] = ..., action_type: _Optional[_Union[ClientUIActionType, str]] = ..., target_element_id: _Optional[str] = ..., parameters: _Optional[_Mapping[str, str]] = ..., highlight_ranges_payload: _Optional[_Iterable[_Union[HighlightRangeProto, _Mapping]]] = ..., suggest_text_edit_payload: _Optional[_Union[SuggestTextEditPayloadProto, _Mapping]] = ..., show_inline_suggestion_payload: _Optional[_Union[ShowInlineSuggestionPayloadProto, _Mapping]] = ..., show_tooltip_or_comment_payload: _Optional[_Union[ShowTooltipOrCommentPayloadProto, _Mapping]] = ..., set_editor_content_payload: _Optional[_Union[SetEditorContentPayloadProto, _Mapping]] = ..., append_text_to_editor_realtime_payload: _Optional[_Union[AppendTextToEditorRealtimePayloadProto, _Mapping]] = ..., strikethrough_ranges_payload: _Optional[_Iterable[_Union[StrikeThroughRangeProto, _Mapping]]] = ..., display_visual_aid_payload: _Optional[_Union[DisplayVisualAidPayloadProto, _Mapping]] = ..., execute_conversational_sequence_payload: _Optional[_Union[ExecuteConversationalSequencePayloadProto, _Mapping]] = ..., display_remarks_list_payload: _Optional[_Union[DisplayRemarksListPayloadProto, _Mapping]] = ..., update_text_content_payload: _Optional[_Union[UpdateTextContentPayloadProto, _Mapping]] = ..., replace_text_range_payload: _Optional[_Union[ReplaceTextRangePayloadProto, _Mapping]] = ...) -> None: ...
 
 class ClientUIActionResponse(_message.Message):
     __slots__ = ("request_id", "success", "message")
