@@ -1,29 +1,54 @@
-# Core dependencies
+# LiveKit Conductor Service Requirements
+# Python Version: 3.9.21
+# Tested and validated on macOS with Apple Silicon
+# Last updated: 2025-07-24
+
+# IMPORTANT: Create virtual environment with Python 3.9.21
+# python3.9 -m venv venv
+# source venv/bin/activate
+# pip install -r requirements.txt
+
+# Core LiveKit Dependencies
 livekit==1.0.6
-python-dotenv==1.1.0
+livekit-protocol==1.0.2
+livekit-agents[deepgram,silero,turn-detector]==1.0.6
+livekit-plugins-noise-cancellation==0.2.1
+
+# Core Framework
 fastapi==0.104.1
 uvicorn==0.23.2
-openai==1.75.0
-grpcio
-grpcio-tools
+python-dotenv==1.1.0
 
-# Audio processing dependencies
+# AI and Language Models
+openai==1.75.0
+
+# RPC and Communication
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+
+# Protobuf (CRITICAL: Must be >=6.0 to match generated code)
+protobuf>=6.31.0
+
+# Audio Processing
 sounddevice==0.5.1
 psutil==7.0.0
 
+# HTTP Client & Async Support
+aiohttp==3.8.6
+aiofiles==23.2.0
+httpx==0.25.0
 
-livekit-agents[deepgram,silero,turn-detector]~=1.0
-livekit-plugins-noise-cancellation~=0.2
-python-dotenv>=1.0.0
+# Google Generative AI for Gemini 2.5 Flash TTS
+google-generativeai==0.8.3
 
-# LiveKit plugins
-livekit-protocol==1.0.2
+# Testing Dependencies
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.11.0
 
-# Utilities
+# Additional Utilities
 anyio>=3.7.1,<4.0.0
 pydantic==2.11.3
-tqdm==4.67.1
-requests==2.32.3
 websockets==15.0.1
 httpx==0.28.1
 

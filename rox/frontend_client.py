@@ -167,3 +167,88 @@ class FrontendClient:
         }
         response = await self._send_rpc(room, identity, "SHOW_FEEDBACK", params)
         return response is not None and response.success
+
+    async def generate_visualization(self, room: rtc.Room, identity: str, prompt: str) -> bool:
+        """
+        Generate a professional visualization on the canvas.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            prompt: Description of the visualization to create
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {"prompt": prompt}
+        response = await self._send_rpc(room, identity, "GENERATE_VISUALIZATION", params)
+        return response is not None and response.success
+
+    async def highlight_elements(self, room: rtc.Room, identity: str, element_ids: list, highlight_type: str = "attention", duration_ms: int = 3000) -> bool:
+        """
+        Highlight specific UI elements.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            element_ids: List of element IDs to highlight
+            highlight_type: Type of highlighting ("attention", "success", "error")
+            duration_ms: Duration to show highlighting
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {
+            "element_ids": element_ids,
+            "highlight_type": highlight_type,
+            "duration_ms": duration_ms
+        }
+        response = await self._send_rpc(room, identity, "HIGHLIGHT_ELEMENTS", params)
+        return response is not None and response.success
+
+    async def give_student_control(self, room: rtc.Room, identity: str, message: str) -> bool:
+        """
+        Transfer control to the student with a message.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            message: Message to show when giving control
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {"message": message}
+        response = await self._send_rpc(room, identity, "GIVE_STUDENT_CONTROL", params)
+        return response is not None and response.success
+
+    async def take_ai_control(self, room: rtc.Room, identity: str, message: str) -> bool:
+        """
+        AI regains control with a message.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            message: Message to show when taking control
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {"message": message}
+        response = await self._send_rpc(room, identity, "TAKE_AI_CONTROL", params)
+        return response is not None and response.success
+
+    async def clear_all_annotations(self, room: rtc.Room, identity: str) -> bool:
+        """
+        Clear all visual annotations and highlights.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {}
+        response = await self._send_rpc(room, identity, "CLEAR_ALL_ANNOTATIONS", params)
+        return response is not None and response.success

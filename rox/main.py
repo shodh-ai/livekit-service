@@ -30,8 +30,10 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 # Local application imports
 from generated.protos import interaction_pb2
 from rpc_services import AgentInteractionService
-from langgraph_client import LangGraphClient
-from frontend_client import FrontendClient
+from .langgraph_client import LangGraphClient
+from .frontend_client import FrontendClient
+from .gemini_tts_client import GeminiTTSClient
+from utils.ui_action_factory import build_ui_action_request
 
 # Configure logging
 logging.basicConfig(
@@ -112,6 +114,14 @@ class RoxAgent(Agent):
         self._langgraph_client = LangGraphClient()
         self._frontend_client = FrontendClient()
         
+        # Initialize Gemini TTS client for emotional speech
+        try:
+            self._gemini_tts_client = GeminiTTSClient()
+            logger.info("Gemini TTS client initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Gemini TTS client: {e}. Falling back to default TTS.")
+            self._gemini_tts_client = None
+        
         # LiveKit components
         self._room: Optional[rtc.Room] = None
         self.agent_session: Optional[agents.AgentSession] = None
@@ -180,11 +190,44 @@ class RoxAgent(Agent):
                     )
                 
                 elif tool_name == "speak":
-                    # Use LiveKit's TTS with interruption support
+                    # Use Gemini TTS with emotional intelligence if available
                     text = parameters.get("text", "")
+                    emotion = parameters.get("emotion")
+                    voice_style = parameters.get("voice_style")
+                    
                     if text and self.agent_session:
-                        await self.agent_session.say(text=text, allow_interruptions=True)
-                        logger.info(f"Spoke: {text[:50]}...")
+                        if self._gemini_tts_client:
+                            try:
+                                # Use Gemini TTS with emotional parameters
+                                audio_data = await self._gemini_tts_client.synthesize_speech(
+                                    text=text,
+                                    emotion=emotion,
+                                    voice_style=voice_style
+                                )
+                                
+                                if audio_data:
+                                    # Create audio track and play through LiveKit
+                                    audio_track = await self._gemini_tts_client.create_audio_track(audio_data)
+                                    if audio_track:
+                                        # Play the emotional audio
+                                        await self.agent_session.play_audio_track(audio_track)
+                                        logger.info(f"Spoke with Gemini TTS [{emotion or 'neutral'}]: {text[:50]}...")
+                                    else:
+                                        # Fallback to default TTS
+                                        await self.agent_session.say(text=text, allow_interruptions=True)
+                                        logger.info(f"Spoke with fallback TTS: {text[:50]}...")
+                                else:
+                                    # Fallback to default TTS
+                                    await self.agent_session.say(text=text, allow_interruptions=True)
+                                    logger.info(f"Spoke with fallback TTS: {text[:50]}...")
+                            except Exception as e:
+                                logger.error(f"Gemini TTS failed: {e}. Using fallback TTS.")
+                                await self.agent_session.say(text=text, allow_interruptions=True)
+                                logger.info(f"Spoke with fallback TTS: {text[:50]}...")
+                        else:
+                            # Use default LiveKit TTS
+                            await self.agent_session.say(text=text, allow_interruptions=True)
+                            logger.info(f"Spoke with default TTS: {text[:50]}...")
                 
                 elif tool_name in ["draw", "browser_navigate", "browser_click", "browser_type"]:
                     # Execute visual actions on the frontend
@@ -192,13 +235,86 @@ class RoxAgent(Agent):
                         self._room, self.caller_identity, tool_name, parameters
                     )
                 
-                elif tool_name == "highlight_element":
-                    # Highlight a specific element on the frontend
-                    element_id = parameters.get("element_id")
-                    if element_id:
-                        await self._frontend_client.highlight_element(
-                            self._room, self.caller_identity, element_id
-                        )
+                # --- Advanced Jupyter Notebook Actions (Script Player Support) ---
+                elif tool_name == "jupyter_type_in_cell":
+                    # Type code into a specific Jupyter cell
+                    await self._frontend_client.execute_visual_action(
+                        self._room, self.caller_identity, tool_name, parameters
+                    )
+                
+                elif tool_name == "jupyter_run_cell":
+                    # Run a specific Jupyter cell
+                    await self._frontend_client.execute_visual_action(
+                        self._room, self.caller_identity, tool_name, parameters
+                    )
+                
+                elif tool_name == "jupyter_create_new_cell":
+                    # Create a new Jupyter cell
+                    await self._frontend_client.execute_visual_action(
+                        self._room, self.caller_identity, tool_name, parameters
+                    )
+                
+                elif tool_name == "jupyter_scroll_to_cell":
+                    # Scroll to a specific Jupyter cell
+                    await self._frontend_client.execute_visual_action(
+                        self._room, self.caller_identity, tool_name, parameters
+                    )
+                
+                elif tool_name == "highlight_cell_for_doubt_resolution":
+                    # Highlight a specific Jupyter cell for doubt resolution
+                    await self._frontend_client.execute_visual_action(
+                        self._room, self.caller_identity, tool_name, parameters
+                    )
+                
+                elif tool_name == "clear_all_annotations":
+                    # Clear all visual annotations
+                    await self._frontend_client.clear_all_annotations(self._room, self.caller_identity)
+                    logger.info("Cleared all annotations")
+                
+                # NEW FRONTEND VOCABULARY TOOLS
+                elif action['tool_name'] == 'generate_visualization':
+                    # Generate professional visualization on canvas
+                    await self._frontend_client.generate_visualization(
+                        self._room, self.caller_identity, 
+                        prompt=action['parameters']['prompt']
+                    )
+                    logger.info(f"Generated visualization: {action['parameters']['prompt']}")
+                
+                elif action['tool_name'] == 'highlight_elements':
+                    # Highlight specific UI elements
+                    await self._frontend_client.highlight_elements(
+                        self._room, self.caller_identity,
+                        element_ids=action['parameters']['element_ids'],
+                        highlight_type=action['parameters'].get('highlight_type', 'attention'),
+                        duration_ms=action['parameters'].get('duration_ms', 3000)
+                    )
+                    logger.info(f"Highlighted elements: {action['parameters']['element_ids']}")
+                
+                elif action['tool_name'] == 'give_student_control':
+                    # Transfer control to student with message
+                    await self._frontend_client.give_student_control(
+                        self._room, self.caller_identity,
+                        message=action['parameters']['message']
+                    )
+                    logger.info(f"Gave student control: {action['parameters']['message']}")
+                
+                elif action['tool_name'] == 'take_ai_control':
+                    # AI regains control with message
+                    await self._frontend_client.take_ai_control(
+                        self._room, self.caller_identity,
+                        message=action['parameters']['message']
+                    )
+                    logger.info(f"AI took control: {action['parameters']['message']}")
+                
+                elif action['tool_name'] == 'show_feedback':
+                    # Show feedback message to student
+                    await self._frontend_client.show_feedback(
+                        self._room, self.caller_identity,
+                        message=action['parameters']['message'],
+                        feedback_type=action['parameters'].get('type', 'info'),
+                        duration_ms=action['parameters'].get('duration_ms', 5000)
+                    )
+                    logger.info(f"Showed feedback: {action['parameters']['message']}")
                 
                 elif tool_name == "listen":
                     # Set expectation state to wait for interruptions

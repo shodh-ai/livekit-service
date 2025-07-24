@@ -29,7 +29,6 @@ if _version_not_supported:
 
 class AgentInteractionStub(object):
     """Service the agent will implement (called by frontend)
-
     """
 
     def __init__(self, channel):
@@ -82,7 +81,6 @@ class AgentInteractionStub(object):
 
 class AgentInteractionServicer(object):
     """Service the agent will implement (called by frontend)
-
     """
 
     def InvokeAgentTask(self, request, context):
@@ -186,7 +184,6 @@ def add_AgentInteractionServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class AgentInteraction(object):
     """Service the agent will implement (called by frontend)
-
     """
 
     @staticmethod
@@ -408,7 +405,6 @@ class AgentInteraction(object):
 
 class ClientSideUIStub(object):
     """Service the CLIENT will implement, and the AGENT will call
-
     """
 
     def __init__(self, channel):
@@ -426,7 +422,6 @@ class ClientSideUIStub(object):
 
 class ClientSideUIServicer(object):
     """Service the CLIENT will implement, and the AGENT will call
-
     """
 
     def PerformUIAction(self, request, context):
@@ -453,7 +448,6 @@ def add_ClientSideUIServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class ClientSideUI(object):
     """Service the CLIENT will implement, and the AGENT will call
-
     """
 
     @staticmethod
