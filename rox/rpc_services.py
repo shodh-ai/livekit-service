@@ -1,102 +1,178 @@
-# rpc_services.py (FINAL, PRODUCTION-READY VERSION)
+# rox/rpc_services.py
+"""RPC service handlers for the Rox Conductor.
+
+This module provides specialized RPC methods that form the Conductor's "ears"
+for receiving specific, meaningful events from the Frontend Sensor.
+"""
 
 import logging
 import json
 import base64
-import asyncio
 from typing import TYPE_CHECKING
-
 from livekit.agents import JobContext
 from livekit.rtc.rpc import RpcInvocationData
 from generated.protos import interaction_pb2
 
 if TYPE_CHECKING:
-    from main import RoxAgent
+    from .main import RoxAgent
 
 logger = logging.getLogger(__name__)
 
+
 class AgentInteractionService:
+    """Service class for handling specialized RPC interactions with the Conductor."""
+
     def __init__(self, ctx: JobContext):
+        """Initialize the service with a job context.
+        
+        Args:
+            ctx: The LiveKit job context containing room and participant info
+        """
         self._ctx = ctx
-        # self.agent_instance is now findable via the context
-        self.agent_instance: "RoxAgent" = ctx.rox_agent
+        self.agent: "RoxAgent" = getattr(ctx, 'rox_agent', None)
 
-    async def InvokeAgentTask(self, raw_payload: RpcInvocationData) -> str:
-        """The universal RPC for triggering any LangGraph task."""
-        logger.info(f"[RPC] InvokeAgentTask received for task.")
-        request = interaction_pb2.InvokeAgentTaskRequest()
-        request.ParseFromString(base64.b64decode(raw_payload.payload))
-
-        # --- THIS IS THE NEW, SAFE LOGIC ---
-        # Before queuing the task, inspect the payload and cache the IDs on the agent instance.
-        # This is safe because this is the first place the data arrives from the client.
-        try:
-            payload_dict = json.loads(request.json_payload)
-            context = payload_dict.get("current_context", {})
-
-            if context.get("user_id"):
-                self.agent_instance.user_id = context.get("user_id")
-                logger.info(f"Cached user_id: {self.agent_instance.user_id}")
-            if context.get("session_id"):
-                self.agent_instance.session_id = context.get("session_id")
-                logger.info(f"Cached session_id: {self.agent_instance.session_id}")
+    async def student_wants_to_interrupt(self, raw_payload: RpcInvocationData) -> str:
+        """Handle the 'Raise Hand' button press from the student.
+        
+        This is triggered when the student wants to interrupt the AI's speech
+        or current action to ask a question or provide input.
+        
+        Args:
+            raw_payload: The raw RPC payload
             
-            # Also cache the identity of the client who made the call
-            self.agent_instance.caller_identity = raw_payload.caller_identity
-            logger.info(f"Cached caller_identity: {self.agent_instance.caller_identity}")
+        Returns:
+            Base64-encoded protobuf response
+        """
+        logger.info("[RPC] Received student_wants_to_interrupt")
+        
+        try:
+            # Immediately stop any ongoing TTS
+            if self.agent and self.agent.agent_session:
+                self.agent.agent_session.interrupt()
+                logger.info("Interrupted ongoing agent speech")
+            
+            # Queue the interrupt task for the Brain
+            if self.agent:
+                task = {
+                    "task_name": "student_wants_to_interrupt",
+                    "caller_identity": raw_payload.caller_identity
+                }
+                await self.agent._processing_queue.put(task)
+                logger.info("Queued interrupt task for Brain processing")
 
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.warning(f"Could not parse context from incoming payload to cache IDs: {e}")
-            # We don't stop the flow, as the IDs might already be cached from a previous call.
-        # --- END OF NEW LOGIC ---
+            response_pb = interaction_pb2.AgentResponse(
+                status_message="Interrupt acknowledged. You may speak now."
+            )
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Error in student_wants_to_interrupt: {e}", exc_info=True)
+            error_response = interaction_pb2.AgentResponse(
+                status_message=f"Error processing interrupt: {str(e)}"
+            )
+            return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
-        # Now, queue the task as before.
-        await self.agent_instance.trigger_langgraph_task(
-            task_name=request.task_name,
-            json_payload=request.json_payload,
-            caller_identity=raw_payload.caller_identity
-        )
+    async def student_spoke_or_acted(self, raw_payload: RpcInvocationData) -> str:
+        """Handle enriched student input from the Frontend Sensor.
+        
+        This is the main handler that receives comprehensive information about
+        what the student said or did, including contextual information like
+        what they were pointing at or the state of their work.
+        
+        Args:
+            raw_payload: The raw RPC payload containing student interaction data
+            
+        Returns:
+            Base64-encoded protobuf response
+        """
+        logger.info("[RPC] Received student_spoke_or_acted")
+        
+        try:
+            # Parse the incoming request
+            request = interaction_pb2.StudentSpokeOrActedRequest()
+            request.ParseFromString(base64.b64decode(raw_payload.payload))
+            
+            if not self.agent:
+                logger.error("Agent not available for processing student input")
+                error_response = interaction_pb2.AgentResponse(
+                    status_message="Agent not available",
+                    success=False
+                )
+                return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
+            
+            # The Conductor decides the task_name based on its current expectation state
+            task_name = ""
+            if self.agent._expected_user_input_type == "SUBMISSION":
+                # The agent was waiting for a specific student submission
+                task_name = request.submission_task_name or "handle_submission"
+                logger.info(f"Processing as submission: {task_name}")
+            else:
+                # Default state is INTERRUPTION - student spoke during AI turn
+                task_name = "handle_interruption"
+                logger.info("Processing as interruption")
+            
+            # Build comprehensive task data for the Brain
+            task = {
+                "task_name": task_name,
+                "transcript": request.transcript,
+                "caller_identity": raw_payload.caller_identity,
+            }
+            
+            # Add student submission data if available
+            if request.canvas_state_json:
+                try:
+                    task["student_submission_data"] = json.loads(request.canvas_state_json)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse canvas state JSON: {e}")
+                    task["student_submission_data"] = None
+            
+            # Add interruption context if available
+            if request.pointed_at_element_id:
+                task["interruption_context"] = {
+                    "pointed_at_element_id": request.pointed_at_element_id
+                }
+            
+            # Add any additional context
+            if request.additional_context:
+                task["additional_context"] = request.additional_context
+            
+            # Queue the task for Brain processing
+            await self.agent._processing_queue.put(task)
+            logger.info(f"Queued task '{task_name}' for Brain processing")
 
-        response_pb = interaction_pb2.AgentResponse(status_message=f"Task '{request.task_name}' acknowledged.")
-        return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
-
-    async def RequestInterrupt(self, raw_payload: RpcInvocationData) -> str:
-        """Handles the 'Raise Hand' button press. This is a high-priority control signal."""
-        logging.info("RPC: Received RequestInterrupt.")
-        if self.agent_instance and self.agent_instance.agent_session:
-            # This call is what triggers the TTSPlaybackCancelled exception
-            self.agent_instance.agent_session.interrupt()
-            logger.warning("Interruption signal sent to agent session.")
-
-        response_pb = interaction_pb2.AgentResponse(status_message="Interrupt acknowledged.")
-        return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+            response_pb = interaction_pb2.AgentResponse(
+                status_message="Input processed successfully."
+            )
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Error in student_spoke_or_acted: {e}", exc_info=True)
+            error_response = interaction_pb2.AgentResponse(
+                status_message=f"Error processing student input: {str(e)}"
+            )
+            return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
     async def TestPing(self, raw_payload: RpcInvocationData) -> str:
-        logger.info(f"[RPC] TestPing received from {raw_payload.caller_identity}.")
-        return base64.b64encode(interaction_pb2.AgentResponse(status_message="Pong!").SerializeToString()).decode('utf-8')
-
-    async def UpdateAgentContext(self, raw_payload: RpcInvocationData) -> str:
-        """Receives context updates from the frontend and merges them into the agent's state."""
-        logger.info("[RPC] UpdateAgentContext received.")
-        request = interaction_pb2.UpdateAgentContextRequest()
-        request.ParseFromString(base64.b64decode(raw_payload.payload))
-
-        try:
-            incoming_context = json.loads(request.json_context_payload)
-            if not isinstance(incoming_context, dict):
-                raise ValueError("Payload is not a dictionary.")
-
-            # Ensure the agent_context dictionary exists
-            if not hasattr(self.agent_instance, 'agent_context'):
-                self.agent_instance.agent_context = {}
+        """Handle ping requests for testing connectivity.
+        
+        Args:
+            raw_payload: The raw RPC payload
             
-            # Merge the new context
-            self.agent_instance.agent_context.update(incoming_context)
-            logger.info(f"Agent context updated: {self.agent_instance.agent_context}")
-
-            response_pb = interaction_pb2.AgentResponse(status_message="Context updated successfully.")
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Failed to update agent context: {e}")
-            response_pb = interaction_pb2.AgentResponse(status_message=f"Error updating context: {e}")
-
-        return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+        Returns:
+            Base64-encoded protobuf response
+        """
+        logger.info("[RPC] Received TestPing")
+        
+        try:
+            response = interaction_pb2.AgentResponse(
+                status_message="Pong! Conductor is alive and responding."
+            )
+            
+            return base64.b64encode(response.SerializeToString()).decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Error in TestPing: {e}", exc_info=True)
+            error_response = interaction_pb2.AgentResponse(
+                status_message=f"Error in ping: {str(e)}"
+            )
+            return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
