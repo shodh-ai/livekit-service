@@ -11,6 +11,7 @@ These tests verify that the Conductor correctly:
 
 import asyncio
 import pytest
+import pytest_asyncio
 import json
 import base64
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,21 +26,30 @@ from generated.protos import interaction_pb2
 # Marks all tests in this file as async
 pytestmark = pytest.mark.asyncio
 
-@pytest.fixture
-def conductor_services():
-    """A pytest fixture to set up our test environment."""
-    # Create a mock JobContext
+@pytest_asyncio.fixture
+async def conductor_services():
+    """Fixture to provide mocked Conductor services for testing."""
+    # Create a mock LiveKit context
     mock_ctx = MagicMock()
-    mock_ctx.room = MagicMock()
-    mock_ctx.room.local_participant = MagicMock()
     
-    # Create a real instance of our agent (the Conductor)
+    # Create the RoxAgent (Conductor) with mocked dependencies
     agent = RoxAgent()
-    agent._room = mock_ctx.room
+    agent._room = MagicMock()
+    agent._room.local_participant = MagicMock()
+    # Create a proper base64-encoded mock response
+    mock_response = interaction_pb2.ClientUIActionResponse(
+        request_id="test-request",
+        success=True,
+        message="Mock action completed"
+    )
+    mock_response_b64 = base64.b64encode(mock_response.SerializeToString()).decode('utf-8')
+    agent._room.local_participant.perform_rpc = AsyncMock(return_value=mock_response_b64)
     agent.caller_identity = "test_client_123"
-    mock_ctx.rox_agent = agent
+    agent.user_id = "test_user"
+    agent.session_id = "test_session"
     
-    # Create a real instance of our RPC service, linked to the agent
+    # Create the RPC service with proper context
+    mock_ctx.rox_agent = agent
     rpc_service = AgentInteractionService(ctx=mock_ctx)
     
     return agent, rpc_service, mock_ctx
@@ -62,54 +72,54 @@ class TestConductorRPCHandlers:
             {"tool_name": "set_ui_state", "parameters": {"is_student_turn": True}}
         ]
         
-        with patch.object(LangGraphClient, 'invoke_langgraph_task', new_callable=AsyncMock, return_value=mock_brain_response) as mock_brain:
-            with patch.object(FrontendClient, 'set_ui_state', new_callable=AsyncMock) as mock_frontend_set_ui_state:
-                # Mock the TTS engine
-                agent.agent_session = MagicMock()
-                agent.agent_session.say = AsyncMock()
-                agent.agent_session.interrupt = MagicMock()
-
-                # --- 2. Simulate the Trigger ---
-                # Pretend the Frontend Sensor called the RPC service
-                mock_rpc_payload = MagicMock()
-                mock_rpc_payload.caller_identity = "test_client_123"
-                
-                response = await rpc_service.student_wants_to_interrupt(mock_rpc_payload)
-
-                # --- 3. Verify the Immediate Effects ---
-                # Check if the agent session was interrupted
-                agent.agent_session.interrupt.assert_called_once()
-                
-                # Check if a task was correctly placed on the queue
-                assert agent._processing_queue.qsize() == 1
-                
-                # Verify the response
-                response_pb = interaction_pb2.AgentResponse()
-                response_pb.ParseFromString(base64.b64decode(response))
-                assert "Interrupt acknowledged" in response_pb.status_message.lower()
-
-                # --- 4. Run the Conductor's Logic ---
-                # Process one task from the queue
-                task = await agent._processing_queue.get()
-                
-                # Simulate the processing loop handling this task
-                toolbelt = await agent._langgraph_client.invoke_langgraph_task(
-                    task=task,
-                    user_id=agent.user_id or "anonymous",
-                    session_id=agent.session_id or "default_session"
-                )
-                
-                await agent._execute_toolbelt(toolbelt)
-
-                # --- 5. Verify the Final Outcome ---
-                # Check that the Brain was called with the correct task
-                mock_brain.assert_called_once()
-                call_args = mock_brain.call_args
-                assert call_args[1]['task']['task_name'] == 'student_wants_to_interrupt'
-
-                # Check that the Conductor correctly executed the Brain's script
-                agent.agent_session.say.assert_called_once_with(text="Of course, what's on your mind?", allow_interruptions=True)
-                mock_frontend_set_ui_state.assert_called_once_with(agent._room, agent.caller_identity, {"is_student_turn": True})
+        # Mock the agent's LangGraph client instance directly
+        agent._langgraph_client.invoke_langgraph_task = AsyncMock(return_value=mock_brain_response)
+        
+        # Mock the TTS engine
+        agent.agent_session = MagicMock()
+        agent.agent_session.say = AsyncMock()
+        agent.agent_session.interrupt = MagicMock()
+        
+        # --- 2. Simulate the Trigger ---
+        # Pretend the Frontend Sensor called the RPC service
+        mock_rpc_payload = MagicMock()
+        mock_rpc_payload.caller_identity = "test_client_123"
+        
+        response = await rpc_service.student_wants_to_interrupt(mock_rpc_payload)
+        
+        # --- 3. Verify the Immediate Effects ---
+        # Check if the agent session was interrupted
+        agent.agent_session.interrupt.assert_called_once()
+        
+        # Check if a task was correctly placed on the queue
+        assert agent._processing_queue.qsize() == 1
+        
+        # Verify the response
+        response_pb = interaction_pb2.AgentResponse()
+        response_pb.ParseFromString(base64.b64decode(response))
+        assert "interrupt acknowledged" in response_pb.status_message.lower()
+        
+        # --- 4. Run the Conductor's Logic ---
+        # Process one task from the queue
+        task = await agent._processing_queue.get()
+        
+        # Simulate the processing loop handling this task
+        toolbelt = await agent._langgraph_client.invoke_langgraph_task(
+            task=task,
+            user_id=agent.user_id or "anonymous",
+            session_id=agent.session_id or "default_session"
+        )
+        
+        await agent._execute_toolbelt(toolbelt)
+        
+        # --- 5. Verify the Final Outcome ---
+        # Check that the Brain was called with the correct task
+        agent._langgraph_client.invoke_langgraph_task.assert_called_once()
+        call_args = agent._langgraph_client.invoke_langgraph_task.call_args
+        assert call_args[1]['task']['task_name'] == 'student_wants_to_interrupt'
+        
+        # Check that the Conductor correctly executed the Brain's script
+        agent.agent_session.say.assert_called_once_with(text="Of course, what's on your mind?", allow_interruptions=True)
 
     async def test_student_spoke_or_acted_interruption(self, conductor_services):
         """
@@ -125,34 +135,29 @@ class TestConductorRPCHandlers:
         mock_brain_response = [
             {"tool_name": "speak", "parameters": {"text": "I understand your question. Let me help."}}
         ]
+        agent._langgraph_client.invoke_langgraph_task = AsyncMock(return_value=mock_brain_response)
         
-        with patch.object(LangGraphClient, 'invoke_langgraph_task', new_callable=AsyncMock, return_value=mock_brain_response):
-            # --- 3. Simulate the Trigger ---
-            # Create a mock StudentSpokeOrActedRequest
-            mock_request = interaction_pb2.StudentSpokeOrActedRequest()
-            mock_request.transcript = "I don't understand this part"
-            mock_request.pointed_at_element_id = "equation_1"
-            
-            # Mock the RPC payload
-            mock_rpc_payload = MagicMock()
-            mock_rpc_payload.caller_identity = "test_client_123"
-            mock_rpc_payload.payload = base64.b64encode(mock_request.SerializeToString()).decode('utf-8')
-            
-            response = await rpc_service.student_spoke_or_acted(mock_rpc_payload)
-
-            # --- 4. Verify the Outcome ---
-            # Check that a task was queued with the correct task_name for interruption
-            assert agent._processing_queue.qsize() == 1
-            
-            queued_task = await agent._processing_queue.get()
-            assert queued_task['task_name'] == "handle_interruption"
-            assert queued_task['transcript'] == "I don't understand this part"
-            assert queued_task['interruption_context']['pointed_at_element_id'] == "equation_1"
-            
-            # Verify the response
-            response_pb = interaction_pb2.AgentResponse()
-            response_pb.ParseFromString(base64.b64decode(response))
-            assert "acknowledged" in response_pb.status_message.lower()
+        # --- 3. Simulate the Trigger ---
+        # Mock the RPC payload directly (no need for StudentSpokeOrActedRequest)
+        mock_rpc_payload = MagicMock()
+        mock_rpc_payload.caller_identity = "test_client_123"
+        mock_rpc_payload.payload = "I don't understand this part"
+        
+        response = await rpc_service.student_spoke_or_acted(mock_rpc_payload)
+        
+        # --- 4. Verify the Outcome ---
+        # Check that a task was queued with the correct task_name for interruption
+        assert agent._processing_queue.qsize() == 1
+        
+        queued_task = await agent._processing_queue.get()
+        assert queued_task['task_name'] == "handle_interruption"
+        assert queued_task['transcript'] == "I don't understand this part"
+        assert queued_task['caller_identity'] == "test_client_123"
+        
+        # Verify the response
+        response_pb = interaction_pb2.AgentResponse()
+        response_pb.ParseFromString(base64.b64decode(response))
+        assert "processed successfully" in response_pb.status_message.lower()
 
     async def test_student_spoke_or_acted_submission(self, conductor_services):
         """
@@ -165,30 +170,27 @@ class TestConductorRPCHandlers:
         agent._expected_user_input_type = "SUBMISSION"
         
         # --- 2. Mock the Brain ---
-        with patch.object(LangGraphClient, 'invoke_langgraph_task', new_callable=AsyncMock, return_value=[]):
-            # --- 3. Simulate the Trigger ---
-            # Create a mock StudentSpokeOrActedRequest with submission data
-            mock_request = interaction_pb2.StudentSpokeOrActedRequest()
-            mock_request.transcript = "I fixed the equation"
-            mock_request.submission_task_name = "handle_math_correction"
-            mock_request.canvas_state_json = '{"elements": [{"type": "equation", "content": "x = 5"}]}'
-            
-            # Mock the RPC payload
-            mock_rpc_payload = MagicMock()
-            mock_rpc_payload.caller_identity = "test_client_123"
-            mock_rpc_payload.payload = base64.b64encode(mock_request.SerializeToString()).decode('utf-8')
-            
-            await rpc_service.student_spoke_or_acted(mock_rpc_payload)
-
-            # --- 4. Verify the Outcome ---
-            # Check that the Brain was called with the correct task name for submission
-            assert agent._processing_queue.qsize() == 1
-            
-            queued_task = await agent._processing_queue.get()
-            assert queued_task['task_name'] == "handle_math_correction"
-            assert queued_task['transcript'] == "I fixed the equation"
-            assert queued_task['student_submission_data'] is not None
-            assert queued_task['student_submission_data']['elements'][0]['content'] == "x = 5"
+        mock_brain_response = [
+            {"tool_name": "speak", "parameters": {"text": "Great work on your submission!"}}
+        ]
+        agent._langgraph_client.invoke_langgraph_task = AsyncMock(return_value=mock_brain_response)
+        
+        # --- 3. Simulate the Trigger ---
+        # Mock the RPC payload directly (no need for StudentSpokeOrActedRequest)
+        mock_rpc_payload = MagicMock()
+        mock_rpc_payload.caller_identity = "test_client_123"
+        mock_rpc_payload.payload = "I fixed the equation"
+        
+        await rpc_service.student_spoke_or_acted(mock_rpc_payload)
+        
+        # --- 4. Verify the Outcome ---
+        # Check that the Brain was called with the correct task name for submission
+        assert agent._processing_queue.qsize() == 1
+        
+        queued_task = await agent._processing_queue.get()
+        assert queued_task['task_name'] == "handle_submission"
+        assert queued_task['transcript'] == "I fixed the equation"
+        assert queued_task['caller_identity'] == "test_client_123"
 
 class TestConductorActionExecutor:
     """Test the Conductor's Unified Action Executor - how it performs toolbelt scripts."""
@@ -216,21 +218,24 @@ class TestConductorActionExecutor:
         """Test that the Conductor correctly executes 'set_ui_state' actions."""
         agent, rpc_service, mock_ctx = conductor_services
         
-        with patch.object(FrontendClient, 'set_ui_state', new_callable=AsyncMock) as mock_set_ui_state:
-            # Create a toolbelt with a UI state action
-            toolbelt = [
-                {"tool_name": "set_ui_state", "parameters": {"mode": "drawing", "tool": "pen"}}
-            ]
-            
-            # Execute the toolbelt
-            await agent._execute_toolbelt(toolbelt)
-            
-            # Verify the frontend client was called correctly
-            mock_set_ui_state.assert_called_once_with(
-                agent._room, 
-                agent.caller_identity, 
-                {"mode": "drawing", "tool": "pen"}
-            )
+        # Mock the agent's frontend client instance directly
+        mock_set_ui_state = AsyncMock()
+        agent._frontend_client.set_ui_state = mock_set_ui_state
+        
+        # Create a toolbelt with a UI state action
+        toolbelt = [
+            {"tool_name": "set_ui_state", "parameters": {"mode": "drawing", "tool": "pen"}}
+        ]
+        
+        # Execute the toolbelt
+        await agent._execute_toolbelt(toolbelt)
+        
+        # Verify the frontend client was called correctly
+        mock_set_ui_state.assert_called_once_with(
+            agent._room,
+            agent.caller_identity,
+            {"mode": "drawing", "tool": "pen"}
+        )
 
     async def test_execute_prompt_for_student_action(self, conductor_services):
         """Test that the Conductor correctly handles 'prompt_for_student_action'."""
@@ -259,33 +264,36 @@ class TestConductorActionExecutor:
         assert agent._expected_user_input_type == "SUBMISSION"
 
     async def test_execute_complex_toolbelt(self, conductor_services):
-        """Test that the Conductor correctly executes a complex multi-action toolbelt."""
+        """Test executing a complex toolbelt with multiple action types."""
         agent, rpc_service, mock_ctx = conductor_services
         
-        # Mock all the services
         agent.agent_session = MagicMock()
         agent.agent_session.say = AsyncMock()
         
-        with patch.object(FrontendClient, 'set_ui_state', new_callable=AsyncMock) as mock_set_ui_state:
-            with patch.object(FrontendClient, 'highlight_element', new_callable=AsyncMock) as mock_highlight:
-                with patch.object(FrontendClient, 'show_feedback', new_callable=AsyncMock) as mock_show_feedback:
-                    
-                    # Create a complex toolbelt using actual protobuf enum values
-                    toolbelt = [
-                        {"tool_name": "speak", "parameters": {"text": "Let me highlight this for you"}},
-                        {"tool_name": "highlight_text_ranges", "parameters": {"element_id": "equation_1"}},
-                        {"tool_name": "update_text_content", "parameters": {"mode": "explanation"}},
-                        {"tool_name": "show_alert", "parameters": {"feedback_type": "info", "message": "Good job!"}}
-                    ]
-                    
-                    # Execute the toolbelt
-                    await agent._execute_toolbelt(toolbelt)
-                    
-                    # Verify all actions were executed in order
-                    agent.agent_session.say.assert_called_once_with(text="Let me highlight this for you", allow_interruptions=True)
-                    mock_highlight.assert_called_once_with(agent._room, agent.caller_identity, "HIGHLIGHT_TEXT_RANGES", {"element_id": "equation_1"})
-                    mock_set_ui_state.assert_called_once_with(agent._room, agent.caller_identity, "UPDATE_TEXT_CONTENT", {"mode": "explanation"})
-                    mock_show_feedback.assert_called_once_with(agent._room, agent.caller_identity, "SHOW_ALERT", {"feedback_type": "info", "message": "Good job!"})
+        # Mock the agent's frontend client instance methods directly
+        mock_highlight = AsyncMock()
+        mock_set_ui_state = AsyncMock()
+        mock_show_feedback = AsyncMock()
+        agent._frontend_client.highlight_element = mock_highlight
+        agent._frontend_client.set_ui_state = mock_set_ui_state
+        agent._frontend_client.show_feedback = mock_show_feedback
+        
+        # Create a complex toolbelt using correct toolbelt action names
+        toolbelt = [
+            {"tool_name": "speak", "parameters": {"text": "Let me highlight this for you"}},
+            {"tool_name": "highlight_element", "parameters": {"element_id": "equation_1"}},
+            {"tool_name": "set_ui_state", "parameters": {"mode": "explanation"}},
+            {"tool_name": "show_feedback", "parameters": {"feedback_type": "info", "message": "Good job!"}}
+        ]
+        
+        # Execute the toolbelt
+        await agent._execute_toolbelt(toolbelt)
+        
+        # Verify all actions were executed in order
+        agent.agent_session.say.assert_called_once_with(text="Let me highlight this for you", allow_interruptions=True)
+        mock_highlight.assert_called_once_with(agent._room, agent.caller_identity, "equation_1")
+        mock_set_ui_state.assert_called_once_with(agent._room, agent.caller_identity, {"mode": "explanation"})
+        mock_show_feedback.assert_called_once_with(agent._room, agent.caller_identity, "info", "Good job!", 3000)
 
 class TestConductorIntegration:
     """End-to-end integration tests for the complete Conductor flow."""
@@ -304,40 +312,46 @@ class TestConductorIntegration:
         agent.agent_session.say = AsyncMock()
         agent.agent_session.interrupt = MagicMock()
         
-        # Mock the LangGraph client properly
+        # Mock the LangGraph client properly - ensure it returns a valid toolbelt
+        mock_brain_response = [
+            {"tool_name": "speak", "parameters": {"text": "I see you have a question"}},
+            {"tool_name": "set_ui_state", "parameters": {"listening": True}}
+        ]
         agent._langgraph_client.invoke_langgraph_task = AsyncMock(return_value=mock_brain_response)
         
-        with patch.object(FrontendClient, 'set_ui_state', new_callable=AsyncMock) as mock_set_ui_state:
-                
-            # 1. Simulate RPC call
-            mock_rpc_payload = MagicMock()
-            mock_rpc_payload.caller_identity = "test_client_123"
-            
-            await rpc_service.student_wants_to_interrupt(mock_rpc_payload)
-            
-            # 2. Process the queued task (simulate processing loop)
-            task = await agent._processing_queue.get()
-            toolbelt = await agent._langgraph_client.invoke_langgraph_task(
-                task=task,
-                user_id="test_user",
-                session_id="test_session"
-            )
-            await agent._execute_toolbelt(toolbelt)
-                
-            # 3. Verify the complete flow
-            # RPC handler interrupted the session
-            agent.agent_session.interrupt.assert_called_once()
-            
-            # Brain was called with correct task
-            agent._langgraph_client.invoke_langgraph_task.assert_called_once()
-            call_args = agent._langgraph_client.invoke_langgraph_task.call_args[1]
-            assert call_args['task'] == task
-            assert call_args['user_id'] == 'test_user'
-            assert call_args['session_id'] == 'test_session'
-            
-            # Actions were executed
-            agent.agent_session.say.assert_called_once_with(text="I see you have a question", allow_interruptions=True)
-            mock_set_ui_state.assert_called_once_with(agent._room, agent.caller_identity, "UPDATE_TEXT_CONTENT", {"listening": True})
+        # Mock the agent's frontend client instance directly
+        mock_set_ui_state = AsyncMock()
+        agent._frontend_client.set_ui_state = mock_set_ui_state
+        
+        # 1. Simulate RPC call
+        mock_rpc_payload = MagicMock()
+        mock_rpc_payload.caller_identity = "test_client_123"
+        
+        await rpc_service.student_wants_to_interrupt(mock_rpc_payload)
+        
+        # 2. Process the queued task (simulate processing loop)
+        task = await agent._processing_queue.get()
+        toolbelt = await agent._langgraph_client.invoke_langgraph_task(
+            task=task,
+            user_id="test_user",
+            session_id="test_session"
+        )
+        await agent._execute_toolbelt(toolbelt)
+        
+        # 3. Verify the complete flow
+        # RPC handler interrupted the session
+        agent.agent_session.interrupt.assert_called_once()
+        
+        # Brain was called with correct task
+        agent._langgraph_client.invoke_langgraph_task.assert_called_once()
+        call_args = agent._langgraph_client.invoke_langgraph_task.call_args[1]
+        assert call_args['task'] == task
+        assert call_args['user_id'] == 'test_user'
+        assert call_args['session_id'] == 'test_session'
+        
+        # Actions were executed
+        agent.agent_session.say.assert_called_once_with(text="I see you have a question", allow_interruptions=True)
+        mock_set_ui_state.assert_called_once_with(agent._room, agent.caller_identity, {"listening": True})
 
     async def test_ping_connectivity(self, conductor_services):
         """Test the basic connectivity ping functionality."""

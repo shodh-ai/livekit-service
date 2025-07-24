@@ -88,10 +88,6 @@ class AgentInteractionService:
         logger.info("[RPC] Received student_spoke_or_acted")
         
         try:
-            # Parse the incoming request
-            request = interaction_pb2.StudentSpokeOrActedRequest()
-            request.ParseFromString(base64.b64decode(raw_payload.payload))
-            
             if not self.agent:
                 logger.error("Agent not available for processing student input")
                 error_response = interaction_pb2.AgentResponse(
@@ -99,42 +95,25 @@ class AgentInteractionService:
                     success=False
                 )
                 return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
-            
+        
             # The Conductor decides the task_name based on its current expectation state
             task_name = ""
             if self.agent._expected_user_input_type == "SUBMISSION":
                 # The agent was waiting for a specific student submission
-                task_name = request.submission_task_name or "handle_submission"
+                task_name = "handle_submission"
                 logger.info(f"Processing as submission: {task_name}")
             else:
                 # Default state is INTERRUPTION - student spoke during AI turn
                 task_name = "handle_interruption"
                 logger.info("Processing as interruption")
-            
+        
             # Build comprehensive task data for the Brain
+            # Since PushToTalkRequest has no fields, we work with raw payload
             task = {
                 "task_name": task_name,
-                "transcript": request.transcript,
+                "transcript": raw_payload.payload,  # Use raw payload as transcript
                 "caller_identity": raw_payload.caller_identity,
             }
-            
-            # Add student submission data if available
-            if request.canvas_state_json:
-                try:
-                    task["student_submission_data"] = json.loads(request.canvas_state_json)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse canvas state JSON: {e}")
-                    task["student_submission_data"] = None
-            
-            # Add interruption context if available
-            if request.pointed_at_element_id:
-                task["interruption_context"] = {
-                    "pointed_at_element_id": request.pointed_at_element_id
-                }
-            
-            # Add any additional context
-            if request.additional_context:
-                task["additional_context"] = request.additional_context
             
             # Queue the task for Brain processing
             await self.agent._processing_queue.put(task)

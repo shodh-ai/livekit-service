@@ -31,14 +31,19 @@ class LangGraphClient:
         """
         logger.info(f"Invoking LangGraph with task: {task.get('task_name')}")
         
-        # Construct the full state payload
-        payload = {
-            "user_id": user_id,
-            "session_id": session_id,
-            **task
+        # Construct the request body to match Brain API format
+        json_payload = {
+            "current_context": {
+                "user_id": user_id,
+                "session_id": session_id
+            },
+            "transcript": task.get("transcript", "Hello")  # Default greeting if no transcript
         }
         
-        request_body = {"json_payload": json.dumps(payload)}
+        request_body = {
+            "task_name": task.get("task_name", "rox_conversation_turn"),
+            "json_payload": json.dumps(json_payload)
+        }
 
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
@@ -72,38 +77,23 @@ class LangGraphClient:
         Returns:
             The final toolbelt as a list of action dictionaries
         """
-        event_data_lines = []
         final_toolbelt = None
+        current_event = None
         
         async for line_bytes in response.content:
             line = line_bytes.decode().strip()
             
-            if line.startswith("data:"):
-                event_data_lines.append(line[len("data:"):].strip())
-            elif line == "":  # Empty line signals end of event
-                if not event_data_lines:
-                    continue
-                    
-                data_str = "\n".join(event_data_lines)
-                event_data_lines.clear()
-                
-                try:
-                    data_obj = json.loads(data_str)
-                    
-                    # Look for the final toolbelt in the event
-                    if isinstance(data_obj, dict):
-                        if "final_toolbelt" in data_obj:
-                            final_toolbelt = data_obj["final_toolbelt"]
-                            logger.debug("Found final_toolbelt in SSE event")
-                        elif "toolbelt" in data_obj:
-                            final_toolbelt = data_obj["toolbelt"]
-                            logger.debug("Found toolbelt in SSE event")
-                        elif data_obj.get("type") == "final" and "actions" in data_obj:
-                            final_toolbelt = data_obj["actions"]
-                            logger.debug("Found actions in final SSE event")
-                            
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse SSE event as JSON: {e}")
-                    continue
+            if line.startswith("event: "):
+                current_event = line[7:]  # Remove 'event: ' prefix
+            elif line.startswith("data: "):
+                data = line[6:]  # Remove 'data: ' prefix
+                if data and data != '[DONE]' and current_event == 'final_toolbelt':
+                    try:
+                        final_toolbelt = json.loads(data)
+                        logger.debug("Found final_toolbelt in SSE stream")
+                        break
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse SSE toolbelt data as JSON: {e}")
+                        continue
         
         return final_toolbelt if final_toolbelt else []

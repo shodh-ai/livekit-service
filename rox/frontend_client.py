@@ -79,7 +79,7 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        response = await self._send_rpc(room, identity, "UPDATE_TEXT_CONTENT", params)
+        response = await self._send_rpc(room, identity, "SET_UI_STATE", params)
         return response is not None and response.success
 
     async def execute_visual_action(self, room: rtc.Room, identity: str, tool_name: str, params: Dict[str, Any]) -> bool:
@@ -123,7 +123,7 @@ class FrontendClient:
             True if successful, False otherwise
         """
         params = {"element_id": element_id}
-        response = await self._send_rpc(room, identity, "HIGHLIGHT_TEXT_RANGES", params)
+        response = await self._send_rpc(room, identity, "HIGHLIGHT_ELEMENT", params)
         return response is not None and response.success
 
     async def speak_with_highlight(self, room: rtc.Room, identity: str, text: str, highlight_words: Optional[Dict[str, str]] = None) -> bool:
@@ -165,5 +165,5 @@ class FrontendClient:
             "message": message,
             "duration_ms": duration_ms
         }
-        response = await self._send_rpc(room, identity, "SHOW_ALERT", params)
+        response = await self._send_rpc(room, identity, "SHOW_FEEDBACK", params)
         return response is not None and response.success
