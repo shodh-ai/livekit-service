@@ -1,3 +1,5 @@
+# File: livekit-service/install_tavus.py
+
 """
 Install script for the Tavus plugin for LiveKit.
 This creates a simple plugin implementation that can be imported.

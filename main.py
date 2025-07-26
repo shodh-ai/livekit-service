@@ -1,3 +1,5 @@
+# File: livekit-service/main.py
+
 import subprocess
 import sys
 from fastapi import FastAPI, HTTPException

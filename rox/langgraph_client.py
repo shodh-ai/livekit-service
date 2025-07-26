@@ -1,3 +1,4 @@
+# File: livekit-service/rox/langgraph_client.py
 # rox/langgraph_client.py
 """
 LangGraph client for communicating with the Brain service.
@@ -80,20 +81,27 @@ class LangGraphClient:
         final_toolbelt = None
         current_event = None
         
-        async for line_bytes in response.content:
-            line = line_bytes.decode().strip()
+        # Read the response line by line
+        async for line_bytes in response.content.iter_any():
+            lines = line_bytes.decode('utf-8').split('\n')
             
-            if line.startswith("event: "):
-                current_event = line[7:]  # Remove 'event: ' prefix
-            elif line.startswith("data: "):
-                data = line[6:]  # Remove 'data: ' prefix
-                if data and data != '[DONE]' and current_event == 'final_toolbelt':
-                    try:
-                        final_toolbelt = json.loads(data)
-                        logger.debug("Found final_toolbelt in SSE stream")
-                        break
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Failed to parse SSE toolbelt data as JSON: {e}")
-                        continue
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                if line.startswith("event: "):
+                    current_event = line[7:]  # Remove 'event: ' prefix
+                    logger.debug(f"SSE event: {current_event}")
+                elif line.startswith("data: "):
+                    data = line[6:]  # Remove 'data: ' prefix
+                    if data and data != '[DONE]' and current_event == 'final_toolbelt':
+                        try:
+                            final_toolbelt = json.loads(data)
+                            logger.info(f"Found final_toolbelt in SSE stream: {len(final_toolbelt)} actions")
+                            return final_toolbelt
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Failed to parse SSE toolbelt data as JSON: {e}")
+                            continue
         
         return final_toolbelt if final_toolbelt else []

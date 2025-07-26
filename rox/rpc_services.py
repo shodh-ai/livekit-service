@@ -1,3 +1,4 @@
+# File: livekit-service/rox/rpc_services.py
 # rox/rpc_services.py
 """RPC service handlers for the Rox Conductor.
 
@@ -134,6 +135,8 @@ class AgentInteractionService:
     async def TestPing(self, raw_payload: RpcInvocationData) -> str:
         """Handle ping requests for testing connectivity.
         
+        Also queues a test task to verify end-to-end LangGraph communication.
+        
         Args:
             raw_payload: The raw RPC payload
             
@@ -143,8 +146,18 @@ class AgentInteractionService:
         logger.info("[RPC] Received TestPing")
         
         try:
+            # Also queue a test task for LangGraph to verify end-to-end flow
+            if self.agent:
+                test_task = {
+                    "task_name": "rox_conversation_turn",
+                    "transcript": "Hello! This is a test message from TestPing to verify LangGraph integration.",
+                    "caller_identity": raw_payload.caller_identity,
+                }
+                await self.agent._processing_queue.put(test_task)
+                logger.info("[TestPing] Queued test task for LangGraph processing")
+            
             response = interaction_pb2.AgentResponse(
-                status_message="Pong! Conductor is alive and responding."
+                status_message="Pong! Conductor is alive and responding. Test task queued for LangGraph."
             )
             
             return base64.b64encode(response.SerializeToString()).decode('utf-8')

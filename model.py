@@ -1,3 +1,5 @@
+# File: livekit-service/model.py
+
 from pydantic import BaseModel
 
 

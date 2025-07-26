@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# File: livekit-service/test_gemini_tts.py
 
 """
 Test script to verify Gemini 2.5 Flash TTS integration in LiveKit

@@ -1,3 +1,4 @@
+# File: livekit-service/rox/frontend_client.py
 # rox/frontend_client.py
 """
 Frontend client for communicating with the UI via RPC calls.

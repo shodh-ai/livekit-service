@@ -1,3 +1,4 @@
+# File: livekit-service/rox/gemini_tts_client.py
 # rox/gemini_tts_client.py
 """
 Gemini 2.5 Flash TTS client for expressive, emotional speech synthesis.

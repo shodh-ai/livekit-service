@@ -30,9 +30,9 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 # Local application imports
 from generated.protos import interaction_pb2
 from rpc_services import AgentInteractionService
-from .langgraph_client import LangGraphClient
-from .frontend_client import FrontendClient
-from .gemini_tts_client import GeminiTTSClient
+from langgraph_client import LangGraphClient
+# from frontend_client import FrontendClient
+# from gemini_tts_client import GeminiTTSClient
 from utils.ui_action_factory import build_ui_action_request
 
 # Configure logging
@@ -111,16 +111,14 @@ class RoxAgent(Agent):
         self._processing_queue: asyncio.Queue = asyncio.Queue()
         
         # --- Communication Clients ---
+        # Re-enable LangGraph client for RPC forwarding
         self._langgraph_client = LangGraphClient()
-        self._frontend_client = FrontendClient()
-        
-        # Initialize Gemini TTS client for emotional speech
-        try:
-            self._gemini_tts_client = GeminiTTSClient()
-            logger.info("Gemini TTS client initialized successfully")
-        except Exception as e:
-            logger.warning(f"Failed to initialize Gemini TTS client: {e}. Falling back to default TTS.")
-            self._gemini_tts_client = None
+        # Keep other clients disabled for now
+        # self._frontend_client = FrontendClient()
+        # self._gemini_tts_client = GeminiTTSClient()
+        self._frontend_client = None
+        self._gemini_tts_client = None
+        logger.info("LangGraph client initialized - RPC forwarding enabled")
         
         # LiveKit components
         self._room: Optional[rtc.Room] = None
@@ -145,6 +143,7 @@ class RoxAgent(Agent):
                 logger.info(f"Processing task: {task.get('task_name')}")
 
                 # 1. Ask the Brain for the script (toolbelt)
+                logger.info(f"Forwarding task to LangGraph: {task.get('task_name')}")
                 toolbelt = await self._langgraph_client.invoke_langgraph_task(
                     task=task,
                     user_id=self.user_id or "anonymous",
@@ -185,49 +184,28 @@ class RoxAgent(Agent):
             try:
                 if tool_name == "set_ui_state":
                     # Change the UI state (e.g., switch to drawing mode)
-                    await self._frontend_client.set_ui_state(
-                        self._room, self.caller_identity, parameters
-                    )
+                    if self._frontend_client:
+                        await self._frontend_client.set_ui_state(
+                            self._room, self.caller_identity, parameters
+                        )
+                    else:
+                        logger.info(f"Frontend client not available - would set UI state: {parameters}")
                 
                 elif tool_name == "speak":
                     # Use Gemini TTS with emotional intelligence if available
-                    text = parameters.get("text", "")
-                    emotion = parameters.get("emotion")
-                    voice_style = parameters.get("voice_style")
-                    
-                    if text and self.agent_session:
-                        if self._gemini_tts_client:
-                            try:
-                                # Use Gemini TTS with emotional parameters
-                                audio_data = await self._gemini_tts_client.synthesize_speech(
-                                    text=text,
-                                    emotion=emotion,
-                                    voice_style=voice_style
-                                )
-                                
-                                if audio_data:
-                                    # Create audio track and play through LiveKit
-                                    audio_track = await self._gemini_tts_client.create_audio_track(audio_data)
-                                    if audio_track:
-                                        # Play the emotional audio
-                                        await self.agent_session.play_audio_track(audio_track)
-                                        logger.info(f"Spoke with Gemini TTS [{emotion or 'neutral'}]: {text[:50]}...")
-                                    else:
-                                        # Fallback to default TTS
-                                        await self.agent_session.say(text=text, allow_interruptions=True)
-                                        logger.info(f"Spoke with fallback TTS: {text[:50]}...")
-                                else:
-                                    # Fallback to default TTS
-                                    await self.agent_session.say(text=text, allow_interruptions=True)
-                                    logger.info(f"Spoke with fallback TTS: {text[:50]}...")
-                            except Exception as e:
-                                logger.error(f"Gemini TTS failed: {e}. Using fallback TTS.")
-                                await self.agent_session.say(text=text, allow_interruptions=True)
-                                logger.info(f"Spoke with fallback TTS: {text[:50]}...")
-                        else:
-                            # Use default LiveKit TTS
+                    if self._gemini_tts_client:
+                        await self._gemini_tts_client.speak_with_emotion(
+                            self._room, parameters.get("text", ""), 
+                            emotion=parameters.get("emotion", "neutral")
+                        )
+                    else:
+                        # Fallback to standard LiveKit TTS using .say()
+                        text = parameters.get("text", "")
+                        if text and self.agent_session:
                             await self.agent_session.say(text=text, allow_interruptions=True)
-                            logger.info(f"Spoke with default TTS: {text[:50]}...")
+                            logger.info(f"Spoke with LiveKit TTS: {text[:50]}...")
+                        else:
+                            logger.warning("No text to speak or agent_session not available")
                 
                 elif tool_name in ["draw", "browser_navigate", "browser_click", "browser_type"]:
                     # Execute visual actions on the frontend
@@ -398,6 +376,14 @@ async def entrypoint(ctx: JobContext):
     - Starts processing loop and agent session
     """
     logger.info("Starting Rox Conductor entrypoint")
+    
+    # Connect to the LiveKit room
+    try:
+        await ctx.connect()
+        logger.info(f"Successfully connected to LiveKit room '{ctx.room.name}'")
+    except Exception as e:
+        logger.error(f"Failed to connect to LiveKit room: {e}", exc_info=True)
+        return
     
     # Create the Conductor instance
     rox_agent_instance = RoxAgent()
