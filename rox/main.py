@@ -12,6 +12,7 @@ import sys
 import logging
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -24,6 +25,8 @@ from dotenv import load_dotenv
 # LiveKit imports
 from livekit import rtc, agents
 from livekit.agents import Agent, JobContext, WorkerOptions
+from livekit.agents.llm import LLM, ChatChunk, ChoiceDelta, ChatContext
+from contextlib import asynccontextmanager
 from livekit.plugins import deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -82,6 +85,94 @@ if not is_running_tests():
 
 
 class RoxAgent(Agent):
+    class TranscriptInterceptor(LLM):
+        """LLM shim that intercepts user speech, enqueues a LangGraph task, and yields no TTS."""
+        def __init__(self, outer: "RoxAgent", debounce_ms: int = 500):
+            super().__init__()
+            self._outer = outer
+            self._debounce_ms = debounce_ms
+            self._buffer: list[str] = []
+            self._debounce_handle: Optional[asyncio.TimerHandle] = None
+
+        def chat(self, *, chat_ctx: ChatContext = None, tools=None, tool_choice=None, **kwargs):  # noqa: D401
+            logger.info(f"TranscriptInterceptor.chat called with chat_ctx: {chat_ctx}, kwargs: {kwargs}")
+            return self._chat_ctx_mgr(chat_ctx)
+
+        @asynccontextmanager
+        async def _chat_ctx_mgr(self, chat_ctx: ChatContext):  # noqa: D401
+            logger.info(f"TranscriptInterceptor._chat_ctx_mgr called with chat_ctx: {chat_ctx}")
+            # Extract latest user transcript
+            transcript = ""
+            if chat_ctx:
+                logger.info(f"Chat context has items: {getattr(chat_ctx, '_items', [])}")
+                messages = getattr(chat_ctx, "_items", [])
+                for msg in reversed(messages):
+                    role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else None)
+                    logger.info(f"Processing message with role: {role}, content: {getattr(msg, 'content', None)}")
+                    if str(role).lower() == "user":
+                        transcript = getattr(msg, "content", None) or (
+                            msg.get("content") if isinstance(msg, dict) else None
+                        )
+                        if isinstance(transcript, list):
+                            transcript = " ".join(map(str, transcript))
+                        transcript = str(transcript)
+                        logger.info(f"Found user transcript: {transcript}")
+                        break
+            else:
+                logger.warning("No chat_ctx provided to TranscriptInterceptor")
+                
+            if transcript:
+                logger.info(f"Adding transcript to buffer: {transcript}")
+                self._buffer.append(transcript)
+                # reset debounce timer
+                if self._debounce_handle:
+                    self._debounce_handle.cancel()
+                loop = asyncio.get_event_loop()
+                self._debounce_handle = loop.call_later(self._debounce_ms / 1000.0, lambda: asyncio.create_task(self._flush()))
+                logger.info(f"Set debounce timer for {self._debounce_ms}ms")
+            else:
+                logger.warning("No transcript found in chat context")
+                
+            # Yield a single empty chunk so that AgentSession does not trigger TTS.
+            try:
+                yield self._stream_empty()
+            finally:
+                pass
+
+        async def _flush(self):
+            logger.info(f"TranscriptInterceptor._flush called with buffer: {self._buffer}")
+            full_transcript = " ".join(self._buffer)
+            self._buffer.clear()
+            logger.info(f"Intercepted transcript: {full_transcript}")
+
+            # Create task payload for LangGraph
+            task_name = "student_spoke_or_acted"
+            turn_payload = {
+                "transcript": full_transcript,
+                "current_context": {
+                    "user_id": self._outer.user_id,
+                    "session_id": self._outer.session_id,
+                    "interaction_type": "speech"
+                }
+            }
+            
+            logger.info(f"=== SENDING TO LANGGRAPH ===")
+            logger.info(f"Task Name: {task_name}")
+            logger.info(f"Payload: {json.dumps(turn_payload, indent=2)}")
+            logger.info(f"Caller Identity: {self._outer.caller_identity}")
+            logger.info(f"User ID: {self._outer.user_id}")
+            logger.info(f"Session ID: {self._outer.session_id}")
+            logger.info(f"==============================")
+            
+            # Forward transcript to LangGraph via the conductor's task queue
+            await self._outer.trigger_langgraph_task(
+                task_name=task_name,
+                json_payload=json.dumps(turn_payload),
+                caller_identity=self._outer.caller_identity
+            )
+
+        async def _stream_empty(self):
+            yield ChatChunk(id=str(uuid.uuid4()), delta=ChoiceDelta(role="assistant", content=""))
     """The Conductor - Central orchestrator for real-time AI tutoring.
     
     This class implements the Conductor pattern, managing:
@@ -110,8 +201,11 @@ class RoxAgent(Agent):
         # Processing queue for tasks from the Brain
         self._processing_queue: asyncio.Queue = asyncio.Queue()
         
+        # --- LLM Interceptor for Speech Processing ---
+        self.llm_interceptor = self.TranscriptInterceptor(self)
+        
         # --- Communication Clients ---
-        # Re-enable LangGraph client for RPC forwarding
+        # LangGraph client for brain communication
         self._langgraph_client = LangGraphClient()
         # Keep other clients disabled for now
         # self._frontend_client = FrontendClient()
@@ -191,21 +285,14 @@ class RoxAgent(Agent):
                     else:
                         logger.info(f"Frontend client not available - would set UI state: {parameters}")
                 
-                elif tool_name == "speak":
-                    # Use Gemini TTS with emotional intelligence if available
-                    if self._gemini_tts_client:
-                        await self._gemini_tts_client.speak_with_emotion(
-                            self._room, parameters.get("text", ""), 
-                            emotion=parameters.get("emotion", "neutral")
-                        )
+                elif tool_name == "speak" or tool_name == "speak_text":
+                    # Use LiveKit's proven .say() method for all speech
+                    text = parameters.get("text", "")
+                    if text and self.agent_session:
+                        await self.agent_session.say(text, allow_interruptions=False)
+                        logger.info(f"Spoke with LiveKit: {text[:50]}...")
                     else:
-                        # Fallback to standard LiveKit TTS using .say()
-                        text = parameters.get("text", "")
-                        if text and self.agent_session:
-                            await self.agent_session.say(text=text, allow_interruptions=True)
-                            logger.info(f"Spoke with LiveKit TTS: {text[:50]}...")
-                        else:
-                            logger.warning("No text to speak or agent_session not available")
+                        logger.warning("No text to speak or agent_session not available")
                 
                 elif tool_name in ["draw", "browser_navigate", "browser_click", "browser_type"]:
                     # Execute visual actions on the frontend
@@ -331,7 +418,7 @@ class RoxAgent(Agent):
     async def speak_text(self, text: str):
         """Convenience method for speaking text via the agent session."""
         if self.agent_session:
-            await self.agent_session.say(text=text, allow_interruptions=True)
+            await self.agent_session.say(text, allow_interruptions=False)
         else:
             logger.warning("Cannot speak: agent_session not available")
 
@@ -390,10 +477,11 @@ async def entrypoint(ctx: JobContext):
     ctx.rox_agent = rox_agent_instance  # Make agent findable by RPC service
     rox_agent_instance._room = ctx.room
     
-    # Create AgentSession with audio capabilities only (no LLM)
-    # The Conductor will handle all conversation logic
+    # Create AgentSession with audio capabilities and LLM interceptor
+    # The LLM interceptor will process user speech and forward to LangGraph
     main_agent_session = agents.AgentSession(
-        stt=deepgram.STT(model="nova-2", language="en-US", api_key=os.environ.get("DEEPGRAM_API_KEY")),
+        stt=deepgram.STT(model="nova-2", language="multi", api_key=os.environ.get("DEEPGRAM_API_KEY")),
+        llm=rox_agent_instance.llm_interceptor,
         tts=deepgram.TTS(model="aura-2-helena-en", api_key=os.environ.get("DEEPGRAM_API_KEY")),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
