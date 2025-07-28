@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Rox Assistant LiveKit Conductor - Refactored Architecture
+Rox Assistant LiveKit Conductor - Unified Service
 
-This module implements the Conductor pattern for sophisticated real-time AI tutoring.
+This module implements both:
+1. The Conductor pattern for sophisticated real-time AI tutoring (LiveKit Agent)
+2. A FastAPI service for launching agents via HTTP endpoints
+
 The Conductor orchestrates communication between the Brain (LangGraph), Body (UI actions),
 and maintains the State of Expectation for intelligent interaction handling.
 """
@@ -13,6 +16,7 @@ import logging
 import asyncio
 import json
 import uuid
+import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -21,6 +25,17 @@ project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv
+
+# FastAPI imports for HTTP service mode
+from fastapi import FastAPI, HTTPException
+try:
+    from model import AgentRequest
+except ImportError:
+    # Define AgentRequest locally if model.py doesn't exist
+    from pydantic import BaseModel
+    class AgentRequest(BaseModel):
+        room_name: str
+        room_url: str
 
 # LiveKit imports
 from livekit import rtc, agents
@@ -563,31 +578,80 @@ async def entrypoint(ctx: JobContext):
     await processing_task
 
 
-if __name__ == "__main__":
-    # The livekit.agents.cli framework handles all argument parsing.
-    # The 'connect', '--room', '--url', '--api-key', etc. arguments
-    # are all parsed automatically by the line below.
+# FastAPI application instance for HTTP service mode
+app = FastAPI(title="Rox Agent Service", description="Unified LiveKit Agent and HTTP API")
+
+@app.get("/")
+def read_root():
+    """Health check endpoint"""
+    return {"service": "Rox Agent Service", "status": "running"}
+
+@app.post("/run-agent")
+def run_agent(agent_request: AgentRequest):
+    """Launch a LiveKit agent for the specified room"""
+    room_name = agent_request.room_name
+    room_url = agent_request.room_url
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+
+    if not all([api_key, api_secret]):
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set."
+        )
     
-    # The 'entrypoint' function will be called with a JobContext
-    # that is already configured with the room and connection details.
-    
+    python_executable = sys.executable
+    current_script = __file__
+    print(f"Starting agent for room: {room_name}")
+    print(f"Room url: {room_url}")
+
     try:
-        agents.cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+        # Launch this same script in agent mode
+        command = [
+            python_executable,
+            current_script,
+            "connect",          # The command for the CLI
+            "--url",           # The URL flag
+            room_url,           # The URL value
+            "--room",           # The room flag
+            room_name,
+            "--api-key",        # The API key flag
+            api_key,
+            "--api-secret",     # The API secret flag
+            api_secret,
+        ]
+        print(f"Executing command: {' '.join(command)}")
+
+        # Run the agent as a non-blocking subprocess
+        process = subprocess.Popen(command)
+
+        return {"message": f"Agent started for room {room_name}", "pid": process.pid}
     except Exception as e:
-        # This can help catch fundamental startup errors
-        logger.error(f"Failed to start LiveKit Conductor CLI: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to run agent: {str(e)}")
+
+def run_fastapi_server():
+    """Run the FastAPI server"""
+    import uvicorn
+    logger.info("Starting FastAPI server on port 5005")
+    uvicorn.run(app, host="0.0.0.0", port=5005)
+
 
 if __name__ == "__main__":
-    # The livekit.agents.cli framework handles all argument parsing.
-    # We no longer need any custom argparse logic here.
-    # The 'connect', '--room', '--url', '--api-key', etc. arguments
-    # are all parsed automatically by the line below.
-    
-    # The 'entrypoint' function will be called with a JobContext
-    # that is already configured with the room and connection details.
-    
-    try:
-        agents.cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
-    except Exception as e:
-        # This can help catch fundamental startup errors
-        logger.error(f"Failed to start LiveKit Agent CLI: {e}", exc_info=True)
+    # Check if we should run in server mode or agent mode
+    if len(sys.argv) == 1 or (len(sys.argv) == 2 and sys.argv[1] == "--server"):
+        # No arguments or --server flag: run FastAPI server
+        run_fastapi_server()
+    else:
+        # Arguments provided: run as LiveKit agent
+        # The livekit.agents.cli framework handles all argument parsing.
+        # The 'connect', '--room', '--url', '--api-key', etc. arguments
+        # are all parsed automatically by the line below.
+        
+        # The 'entrypoint' function will be called with a JobContext
+        # that is already configured with the room and connection details.
+        
+        try:
+            agents.cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+        except Exception as e:
+            # This can help catch fundamental startup errors
+            logger.error(f"Failed to start LiveKit Agent CLI: {e}", exc_info=True)

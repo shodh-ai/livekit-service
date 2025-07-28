@@ -1,0 +1,22 @@
+# Fast development Dockerfile - builds in ~30 seconds
+FROM python:3.11-slim
+
+# Install minimal system dependencies
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy and install minimal requirements only
+COPY requirements.minimal.txt .
+RUN pip install -r requirements.minimal.txt
+
+# Copy application code
+COPY . .
+WORKDIR /app/rox
+
+# Environment setup
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app:/app/rox
+
+EXPOSE 5005
+CMD ["python", "main.py", "--server"]
