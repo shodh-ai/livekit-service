@@ -34,7 +34,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from generated.protos import interaction_pb2
 from rpc_services import AgentInteractionService
 from langgraph_client import LangGraphClient
-# from frontend_client import FrontendClient
+from frontend_client import FrontendClient
 # from gemini_tts_client import GeminiTTSClient
 from utils.ui_action_factory import build_ui_action_request
 
@@ -207,10 +207,9 @@ class RoxAgent(Agent):
         # --- Communication Clients ---
         # LangGraph client for brain communication
         self._langgraph_client = LangGraphClient()
+        # Frontend client enabled for visual actions
+        self._frontend_client = FrontendClient()
         # Keep other clients disabled for now
-        # self._frontend_client = FrontendClient()
-        # self._gemini_tts_client = GeminiTTSClient()
-        self._frontend_client = None
         self._gemini_tts_client = None
         logger.info("LangGraph client initialized - RPC forwarding enabled")
         
@@ -269,7 +268,10 @@ class RoxAgent(Agent):
         """
         logger.info(f"Executing toolbelt with {len(toolbelt)} actions")
         
-        for i, action in enumerate(toolbelt):
+        # Pre-process to combine consecutive speak actions for smoother TTS
+        optimized_toolbelt = self._optimize_speech_actions(toolbelt)
+        
+        for i, action in enumerate(optimized_toolbelt):
             tool_name = action.get("tool_name")
             parameters = action.get("parameters", {})
             
@@ -296,90 +298,126 @@ class RoxAgent(Agent):
                 
                 elif tool_name in ["draw", "browser_navigate", "browser_click", "browser_type"]:
                     # Execute visual actions on the frontend
-                    await self._frontend_client.execute_visual_action(
-                        self._room, self.caller_identity, tool_name, parameters
-                    )
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                    else:
+                        logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
                 
                 # --- Advanced Jupyter Notebook Actions (Script Player Support) ---
                 elif tool_name == "jupyter_type_in_cell":
                     # Type code into a specific Jupyter cell
-                    await self._frontend_client.execute_visual_action(
-                        self._room, self.caller_identity, tool_name, parameters
-                    )
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                    else:
+                        logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
                 
                 elif tool_name == "jupyter_run_cell":
                     # Run a specific Jupyter cell
-                    await self._frontend_client.execute_visual_action(
-                        self._room, self.caller_identity, tool_name, parameters
-                    )
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                    else:
+                        logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
                 
                 elif tool_name == "jupyter_create_new_cell":
                     # Create a new Jupyter cell
-                    await self._frontend_client.execute_visual_action(
-                        self._room, self.caller_identity, tool_name, parameters
-                    )
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                    else:
+                        logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
                 
                 elif tool_name == "jupyter_scroll_to_cell":
                     # Scroll to a specific Jupyter cell
-                    await self._frontend_client.execute_visual_action(
-                        self._room, self.caller_identity, tool_name, parameters
-                    )
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                    else:
+                        logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
                 
                 elif tool_name == "highlight_cell_for_doubt_resolution":
                     # Highlight a specific Jupyter cell for doubt resolution
-                    await self._frontend_client.execute_visual_action(
-                        self._room, self.caller_identity, tool_name, parameters
-                    )
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                    else:
+                        logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
                 
                 elif tool_name == "clear_all_annotations":
                     # Clear all visual annotations
-                    await self._frontend_client.clear_all_annotations(self._room, self.caller_identity)
-                    logger.info("Cleared all annotations")
+                    if self._frontend_client:
+                        await self._frontend_client.clear_all_annotations(self._room, self.caller_identity)
+                        logger.info("Cleared all annotations")
+                    else:
+                        logger.warning("Frontend client not available - would clear all annotations")
                 
                 # NEW FRONTEND VOCABULARY TOOLS
                 elif action['tool_name'] == 'generate_visualization':
                     # Generate professional visualization on canvas
-                    await self._frontend_client.generate_visualization(
-                        self._room, self.caller_identity, 
-                        prompt=action['parameters']['prompt']
-                    )
-                    logger.info(f"Generated visualization: {action['parameters']['prompt']}")
+                    if self._frontend_client:
+                        await self._frontend_client.generate_visualization(
+                            self._room, self.caller_identity, 
+                            prompt=action['parameters']['prompt']
+                        )
+                        logger.info(f"Generated visualization: {action['parameters']['prompt']}")
+                    else:
+                        logger.warning(f"Frontend client not available - would generate visualization: {action['parameters']['prompt']}")
                 
                 elif action['tool_name'] == 'highlight_elements':
                     # Highlight specific UI elements
-                    await self._frontend_client.highlight_elements(
-                        self._room, self.caller_identity,
-                        element_ids=action['parameters']['element_ids'],
-                        highlight_type=action['parameters'].get('highlight_type', 'attention'),
-                        duration_ms=action['parameters'].get('duration_ms', 3000)
-                    )
-                    logger.info(f"Highlighted elements: {action['parameters']['element_ids']}")
+                    if self._frontend_client:
+                        await self._frontend_client.highlight_elements(
+                            self._room, self.caller_identity,
+                            element_ids=action['parameters']['element_ids'],
+                            highlight_type=action['parameters'].get('highlight_type', 'attention'),
+                            duration_ms=action['parameters'].get('duration_ms', 3000)
+                        )
+                        logger.info(f"Highlighted elements: {action['parameters']['element_ids']}")
+                    else:
+                        logger.warning(f"Frontend client not available - would highlight elements: {action['parameters']['element_ids']}")
                 
                 elif action['tool_name'] == 'give_student_control':
                     # Transfer control to student with message
-                    await self._frontend_client.give_student_control(
-                        self._room, self.caller_identity,
-                        message=action['parameters']['message']
-                    )
-                    logger.info(f"Gave student control: {action['parameters']['message']}")
+                    if self._frontend_client:
+                        await self._frontend_client.give_student_control(
+                            self._room, self.caller_identity,
+                            message=action['parameters']['message']
+                        )
+                        logger.info(f"Gave student control: {action['parameters']['message']}")
+                    else:
+                        logger.warning(f"Frontend client not available - would give student control: {action['parameters']['message']}")
                 
                 elif action['tool_name'] == 'take_ai_control':
                     # AI regains control with message
-                    await self._frontend_client.take_ai_control(
-                        self._room, self.caller_identity,
-                        message=action['parameters']['message']
-                    )
-                    logger.info(f"AI took control: {action['parameters']['message']}")
+                    if self._frontend_client:
+                        await self._frontend_client.take_ai_control(
+                            self._room, self.caller_identity,
+                            message=action['parameters']['message']
+                        )
+                        logger.info(f"AI took control: {action['parameters']['message']}")
+                    else:
+                        logger.warning(f"Frontend client not available - would take AI control: {action['parameters']['message']}")
                 
                 elif action['tool_name'] == 'show_feedback':
                     # Show feedback message to student
-                    await self._frontend_client.show_feedback(
-                        self._room, self.caller_identity,
-                        message=action['parameters']['message'],
-                        feedback_type=action['parameters'].get('type', 'info'),
-                        duration_ms=action['parameters'].get('duration_ms', 5000)
-                    )
-                    logger.info(f"Showed feedback: {action['parameters']['message']}")
+                    if self._frontend_client:
+                        await self._frontend_client.show_feedback(
+                            self._room, self.caller_identity,
+                            message=action['parameters']['message'],
+                            feedback_type=action['parameters'].get('type', 'info'),
+                            duration_ms=action['parameters'].get('duration_ms', 5000)
+                        )
+                        logger.info(f"Showed feedback: {action['parameters']['message']}")
+                    else:
+                        logger.warning(f"Frontend client not available - would show feedback: {action['parameters']['message']}")
                 
                 elif tool_name == "listen":
                     # Set expectation state to wait for interruptions
@@ -414,6 +452,50 @@ class RoxAgent(Agent):
             except Exception as action_err:
                 logger.error(f"Error executing action '{tool_name}': {action_err}", exc_info=True)
                 # Continue with next action rather than failing entire toolbelt
+
+    def _optimize_speech_actions(self, toolbelt: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Combine consecutive speak actions to prevent TTS hiccups.
+        
+        This method merges multiple consecutive 'speak' actions into single calls
+        with natural pauses, eliminating audio gaps and creating smooth playback.
+        """
+        if not toolbelt:
+            return toolbelt
+            
+        optimized = []
+        current_speech_buffer = []
+        
+        for action in toolbelt:
+            tool_name = action.get("tool_name")
+            
+            if tool_name in ["speak", "speak_text"]:
+                # Accumulate consecutive speak actions
+                text = action.get("parameters", {}).get("text", "")
+                if text.strip():
+                    current_speech_buffer.append(text.strip())
+            else:
+                # Flush accumulated speech before non-speech action
+                if current_speech_buffer:
+                    combined_text = " ".join(current_speech_buffer)
+                    optimized.append({
+                        "tool_name": "speak",
+                        "parameters": {"text": combined_text}
+                    })
+                    current_speech_buffer = []
+                
+                # Add the non-speech action
+                optimized.append(action)
+        
+        # Flush any remaining speech at the end
+        if current_speech_buffer:
+            combined_text = " ".join(current_speech_buffer)
+            optimized.append({
+                "tool_name": "speak",
+                "parameters": {"text": combined_text}
+            })
+        
+        logger.info(f"Speech optimization: {len(toolbelt)} actions -> {len(optimized)} actions")
+        return optimized
 
     async def speak_text(self, text: str):
         """Convenience method for speaking text via the agent session."""
