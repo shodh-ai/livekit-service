@@ -10,7 +10,7 @@ import uuid
 import base64
 from typing import Dict, Any, Optional
 from livekit import rtc
-from generated import interaction_pb2
+from generated.protos import interaction_pb2
 from utils.ui_action_factory import build_ui_action_request
 
 logger = logging.getLogger(__name__)

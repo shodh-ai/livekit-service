@@ -46,7 +46,7 @@ from livekit.plugins import deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # Local application imports
-from generated import interaction_pb2
+from generated.protos import interaction_pb2
 from rpc_services import AgentInteractionService
 from langgraph_client import LangGraphClient
 from frontend_client import FrontendClient

@@ -12,7 +12,7 @@ import base64
 from typing import TYPE_CHECKING
 from livekit.agents import JobContext
 from livekit.rtc.rpc import RpcInvocationData
-from generated import interaction_pb2
+from generated.protos import interaction_pb2
 
 if TYPE_CHECKING:
     from .main import RoxAgent
