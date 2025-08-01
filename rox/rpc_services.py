@@ -12,7 +12,7 @@ import base64
 from typing import TYPE_CHECKING
 from livekit.agents import JobContext
 from livekit.rtc.rpc import RpcInvocationData
-from generated.protos import interaction_pb2
+from generated import interaction_pb2
 
 if TYPE_CHECKING:
     from .main import RoxAgent
@@ -87,6 +87,7 @@ class AgentInteractionService:
             Base64-encoded protobuf response
         """
         logger.info("[RPC] Received student_spoke_or_acted")
+        logger.info(f"[RPC] Raw Payload: {raw_payload.payload}")  # Log the payload for debugging
         
         try:
             if not self.agent:

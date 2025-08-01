@@ -10,7 +10,7 @@ import uuid
 import base64
 from typing import Dict, Any, Optional
 from livekit import rtc
-from generated.protos import interaction_pb2
+from generated import interaction_pb2
 from utils.ui_action_factory import build_ui_action_request
 
 logger = logging.getLogger(__name__)
@@ -169,19 +169,26 @@ class FrontendClient:
         response = await self._send_rpc(room, identity, "SHOW_FEEDBACK", params)
         return response is not None and response.success
 
-    async def generate_visualization(self, room: rtc.Room, identity: str, prompt: str) -> bool:
+    async def generate_visualization(self, room: rtc.Room, identity: str, elements: list = None, prompt: str = None) -> bool:
         """
         Generate a professional visualization on the canvas.
         
         Args:
             room: The LiveKit room
             identity: The client identity
-            prompt: Description of the visualization to create
+            elements: Array of SkeletonElement objects for structured visualization (preferred)
+            prompt: Description of the visualization to create (fallback for legacy support)
             
         Returns:
             True if successful, False otherwise
         """
-        params = {"prompt": prompt}
+        if elements:
+            params = {"elements": elements}
+        elif prompt:
+            params = {"prompt": prompt}
+        else:
+            params = {"elements": []}
+        
         response = await self._send_rpc(room, identity, "GENERATE_VISUALIZATION", params)
         return response is not None and response.success
 

@@ -238,6 +238,17 @@ enum ClientUIActionType {
   GIVE_STUDENT_CONTROL = 51;            // Transfer control to student with message
   TAKE_AI_CONTROL = 52;                 // AI regains control with message
   CLEAR_ALL_ANNOTATIONS = 53;           // Clear all visual annotations and highlights
+  
+  // Jupyter Notebook Actions
+  JUPYTER_TYPE_IN_CELL = 54;            // Type code into a Jupyter notebook cell
+  JUPYTER_RUN_CELL = 55;                // Execute a Jupyter notebook cell
+  JUPYTER_CREATE_NEW_CELL = 56;         // Create a new Jupyter notebook cell
+  
+  // Browser Navigation and Interaction Actions
+  BROWSER_NAVIGATE = 57;                // Navigate browser to a specific URL
+  BROWSER_CLICK = 58;                   // Click on a browser element
+  BROWSER_TYPE = 59;                    // Type text into a browser input field
+  UPLOAD_FILE_TO_JUPYTER = 60;          // Upload a file to Jupyter notebook environment
 }
 // Request from Agent to Client to perform a UI action
 message AgentToClientUIActionRequest {

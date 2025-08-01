@@ -46,7 +46,7 @@ from livekit.plugins import deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # Local application imports
-from generated.protos import interaction_pb2
+from generated import interaction_pb2
 from rpc_services import AgentInteractionService
 from langgraph_client import LangGraphClient
 from frontend_client import FrontendClient
@@ -248,7 +248,7 @@ class RoxAgent(Agent):
             try:
                 # Wait for a task to be queued
                 task = await self._processing_queue.get()
-                logger.info(f"Processing task: {task.get('task_name')}")
+                logger.info(f"DEQUEUED TASK: {json.dumps(task, indent=2)}")
 
                 # 1. Ask the Brain for the script (toolbelt)
                 logger.info(f"Forwarding task to LangGraph: {task.get('task_name')}")
@@ -258,6 +258,8 @@ class RoxAgent(Agent):
                     session_id=self.session_id or "default_session"
                 )
                 
+                logger.info(f"RECEIVED TOOLBELT FROM BRAIN: {json.dumps(toolbelt, indent=2)}")
+
                 if not toolbelt:
                     logger.error("Received empty toolbelt from Brain. Skipping turn.")
                     continue
@@ -374,65 +376,74 @@ class RoxAgent(Agent):
                     else:
                         logger.warning("Frontend client not available - would clear all annotations")
                 
-                # NEW FRONTEND VOCABULARY TOOLS
-                elif action['tool_name'] == 'generate_visualization':
-                    # Generate professional visualization on canvas
+                # --- NEW FRONTEND VOCABULARY TOOLS ---
+                elif tool_name == 'generate_visualization':
+                    # Generate professional visualization on canvas -> DISPLAY_VISUAL_AID
                     if self._frontend_client:
+                        # Support both new structured format (elements) and legacy format (prompt)
+                        elements = parameters.get('elements')
+                        prompt = parameters.get('prompt')
+                        
                         await self._frontend_client.generate_visualization(
                             self._room, self.caller_identity, 
-                            prompt=action['parameters']['prompt']
+                            elements=elements,
+                            prompt=prompt
                         )
-                        logger.info(f"Generated visualization: {action['parameters']['prompt']}")
+                        
+                        if elements:
+                            logger.info(f"Generated visualization with {len(elements)} structured elements")
+                        else:
+                            logger.info(f"Generated visualization: {prompt}")
                     else:
-                        logger.warning(f"Frontend client not available - would generate visualization: {action['parameters']['prompt']}")
+                        logger.warning(f"Frontend client not available - would generate visualization: {parameters}")
                 
-                elif action['tool_name'] == 'highlight_elements':
-                    # Highlight specific UI elements
+                elif tool_name == 'highlight_elements':
+                    # Highlight specific UI elements -> HIGHLIGHT_TEXT_RANGES
                     if self._frontend_client:
                         await self._frontend_client.highlight_elements(
                             self._room, self.caller_identity,
-                            element_ids=action['parameters']['element_ids'],
-                            highlight_type=action['parameters'].get('highlight_type', 'attention'),
-                            duration_ms=action['parameters'].get('duration_ms', 3000)
+                            element_ids=parameters.get('element_ids', []),
+                            highlight_type=parameters.get('highlight_type', 'attention'),
+                            duration_ms=parameters.get('duration_ms', 3000)
                         )
-                        logger.info(f"Highlighted elements: {action['parameters']['element_ids']}")
+                        logger.info(f"Highlighted elements: {parameters.get('element_ids', [])}")
                     else:
-                        logger.warning(f"Frontend client not available - would highlight elements: {action['parameters']['element_ids']}")
+                        logger.warning(f"Frontend client not available - would highlight elements: {parameters.get('element_ids', [])}")
                 
-                elif action['tool_name'] == 'give_student_control':
+                elif tool_name == 'give_student_control':
                     # Transfer control to student with message
                     if self._frontend_client:
                         await self._frontend_client.give_student_control(
                             self._room, self.caller_identity,
-                            message=action['parameters']['message']
+                            message=parameters.get('message', '')
                         )
-                        logger.info(f"Gave student control: {action['parameters']['message']}")
+                        logger.info(f"Gave student control: {parameters.get('message', '')}")
                     else:
-                        logger.warning(f"Frontend client not available - would give student control: {action['parameters']['message']}")
+                        logger.warning(f"Frontend client not available - would give student control: {parameters.get('message', '')}")
                 
-                elif action['tool_name'] == 'take_ai_control':
+                elif tool_name == 'take_ai_control':
                     # AI regains control with message
                     if self._frontend_client:
                         await self._frontend_client.take_ai_control(
                             self._room, self.caller_identity,
-                            message=action['parameters']['message']
+                            message=parameters.get('message', '')
                         )
-                        logger.info(f"AI took control: {action['parameters']['message']}")
+                        logger.info(f"AI took control: {parameters.get('message', '')}")
                     else:
-                        logger.warning(f"Frontend client not available - would take AI control: {action['parameters']['message']}")
+                        logger.warning(f"Frontend client not available - would take AI control: {parameters.get('message', '')}")
                 
-                elif action['tool_name'] == 'show_feedback':
+                elif tool_name == 'show_feedback':
                     # Show feedback message to student
                     if self._frontend_client:
                         await self._frontend_client.show_feedback(
                             self._room, self.caller_identity,
-                            message=action['parameters']['message'],
-                            feedback_type=action['parameters'].get('type', 'info'),
-                            duration_ms=action['parameters'].get('duration_ms', 5000)
+                            message=parameters.get('message', ''),
+                            feedback_type=parameters.get('type', 'info'),
+                            duration_ms=parameters.get('duration_ms', 5000)
                         )
-                        logger.info(f"Showed feedback: {action['parameters']['message']}")
+                        logger.info(f"Showed feedback: {parameters.get('message', '')}")
                     else:
-                        logger.warning(f"Frontend client not available - would show feedback: {action['parameters']['message']}")
+                        logger.warning(f"Frontend client not available - would show feedback: {parameters.get('message', '')}")
                 
                 elif tool_name == "listen":
                     # Set expectation state to wait for interruptions
@@ -451,15 +462,33 @@ class RoxAgent(Agent):
                     # The AI's turn is over - wait for student submission
                     break
                 
-                elif tool_name == "show_feedback":
-                    # Show feedback message on the frontend
-                    await self._frontend_client.show_feedback(
-                        self._room, 
-                        self.caller_identity,
-                        parameters.get("feedback_type", "info"),
-                        parameters.get("message", ""),
-                        parameters.get("duration_ms", 3000)
-                    )
+                elif tool_name == 'clear_all_annotations':
+                    # Clear all visual annotations and highlights
+                    if self._frontend_client:
+                        await self._frontend_client.clear_all_annotations(
+                            self._room, self.caller_identity
+                        )
+                        logger.info("Cleared all canvas annotations")
+                    else:
+                        logger.warning("Frontend client not available - would clear all annotations")
+                
+                elif tool_name == 'capture_canvas_screenshot':
+                    # Capture screenshot of current canvas state
+                    if self._frontend_client:
+                        # This would need to be implemented in frontend_client.py
+                        logger.info("Canvas screenshot capture requested (implementation needed)")
+                        # TODO: Implement screenshot capture in frontend_client
+                    else:
+                        logger.warning("Frontend client not available - would capture canvas screenshot")
+                
+                elif tool_name == 'get_canvas_elements':
+                    # Get list of all elements currently on canvas
+                    if self._frontend_client:
+                        # This would need to be implemented in frontend_client.py
+                        logger.info("Canvas elements list requested (implementation needed)")
+                        # TODO: Implement get_canvas_elements in frontend_client
+                    else:
+                        logger.warning("Frontend client not available - would get canvas elements")
                 
                 else:
                     logger.warning(f"Unknown tool_name: {tool_name}")

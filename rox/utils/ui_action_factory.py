@@ -6,7 +6,7 @@ import uuid
 import json
 from typing import Dict, Any
 
-from generated.protos import interaction_pb2
+from generated import interaction_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +64,28 @@ def build_ui_action_request(action_type: str, parameters: Dict[str, Any]) -> int
         payload.end = int(parameters.get("end_pos", 0))
         payload.replacement = str(parameters.get("new_text", ""))
 
+    elif action_type == "DISPLAY_VISUAL_AID":
+        payload = request_pb.display_visual_aid_payload
+        payload.commands_json = json.dumps(parameters.get("prompt", ""))
+        if "canvas_id" in parameters:
+            payload.canvas_id = str(parameters["canvas_id"])
+        if "clear_previous" in parameters:
+            payload.clear_previous = bool(parameters["clear_previous"])
+            
+    elif action_type == "HIGHLIGHT_TEXT_RANGES":
+        # For highlight_elements -> HIGHLIGHT_TEXT_RANGES mapping
+        element_ids = parameters.get("elementIds", [])
+        for i, element_id in enumerate(element_ids):
+            request_pb.highlight_ranges_payload.add(
+                id=str(element_id),
+                start=0,  # Default values for canvas highlighting
+                end=0,
+                type="highlight"
+            )
+    
     else:
         # Fallback for simple actions that use the generic parameters map,
-        # like NAVIGATE_TO_PAGE, SHOW_LOADING_INDICATOR, etc.
+        # like NAVIGATE_TO_PAGE, SHOW_LOADING_INDICATOR, SET_UI_STATE, etc.
         logger.info(f"Using generic parameters map for action: {action_type}")
         for key, value in parameters.items():
             if isinstance(value, (dict, list)):
