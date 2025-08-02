@@ -240,15 +240,18 @@ enum ClientUIActionType {
   CLEAR_ALL_ANNOTATIONS = 53;           // Clear all visual annotations and highlights
   
   // Jupyter Notebook Actions
-  JUPYTER_TYPE_IN_CELL = 54;            // Type code into a Jupyter notebook cell
+  JUPYTER_TYPE_IN_CELL = 54;           // Type code into a Jupyter notebook cell
   JUPYTER_RUN_CELL = 55;                // Execute a Jupyter notebook cell
   JUPYTER_CREATE_NEW_CELL = 56;         // Create a new Jupyter notebook cell
+  JUPYTER_SCROLL_TO_CELL = 57;         // Scroll to a specific cell in Jupyter notebook
+  JUPYTER_CLICK_PYODIDE = 58;           // Click on a Pyodide element in Jupyter notebook
   
   // Browser Navigation and Interaction Actions
-  BROWSER_NAVIGATE = 57;                // Navigate browser to a specific URL
-  BROWSER_CLICK = 58;                   // Click on a browser element
-  BROWSER_TYPE = 59;                    // Type text into a browser input field
-  UPLOAD_FILE_TO_JUPYTER = 60;          // Upload a file to Jupyter notebook environment
+  BROWSER_NAVIGATE = 59;                // Navigate browser to a specific URL
+  BROWSER_CLICK = 60;                   // Click on a browser element
+  BROWSER_TYPE = 61;                    // Type text into a browser input field
+  UPLOAD_FILE_TO_JUPYTER = 62;          // Upload a file to Jupyter notebook environment
+  HIGHLIGHT_CELL_FOR_DOUBT_RESOLUTION = 63;
 }
 // Request from Agent to Client to perform a UI action
 message AgentToClientUIActionRequest {

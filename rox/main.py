@@ -46,7 +46,7 @@ from livekit.plugins import deepgram, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # Local application imports
-from generated.protos import interaction_pb2
+from protos import interaction_pb2
 from rpc_services import AgentInteractionService
 from langgraph_client import LangGraphClient
 from frontend_client import FrontendClient
@@ -352,6 +352,15 @@ class RoxAgent(Agent):
                 
                 elif tool_name == "jupyter_scroll_to_cell":
                     # Scroll to a specific Jupyter cell
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                    else:
+                        logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
+                
+                elif tool_name == "jupyter_click_pyodide":
+                    # Click on Pyodide kernel option in Jupyter
                     if self._frontend_client:
                         await self._frontend_client.execute_visual_action(
                             self._room, self.caller_identity, tool_name, parameters
