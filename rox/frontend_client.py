@@ -104,7 +104,16 @@ class FrontendClient:
             "browser_type": "BROWSER_TYPE",
             "highlight_element": "HIGHLIGHT_ELEMENT",
             "show_overlay": "SHOW_OVERLAY",
-            "hide_overlay": "HIDE_OVERLAY"
+            "hide_overlay": "HIDE_OVERLAY",
+            # Excalidraw Canvas Actions
+            "clear_canvas": "EXCALIDRAW_CLEAR_CANVAS",
+            "update_elements": "EXCALIDRAW_UPDATE_ELEMENTS",
+            "remove_highlighting": "EXCALIDRAW_REMOVE_HIGHLIGHTING",
+            "highlight_elements_advanced": "EXCALIDRAW_HIGHLIGHT_ELEMENTS_ADVANCED",
+            "modify_elements": "EXCALIDRAW_MODIFY_ELEMENTS",
+            "capture_screenshot": "EXCALIDRAW_CAPTURE_SCREENSHOT",
+            "get_canvas_elements": "EXCALIDRAW_GET_CANVAS_ELEMENTS",
+            "set_generating": "EXCALIDRAW_SET_GENERATING"
         }
         
         action_type = action_type_map.get(tool_name, tool_name.upper())

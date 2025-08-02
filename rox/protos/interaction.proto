@@ -249,6 +249,16 @@ enum ClientUIActionType {
   BROWSER_CLICK = 58;                   // Click on a browser element
   BROWSER_TYPE = 59;                    // Type text into a browser input field
   UPLOAD_FILE_TO_JUPYTER = 60;          // Upload a file to Jupyter notebook environment
+  
+  // Excalidraw Canvas Actions
+  EXCALIDRAW_CLEAR_CANVAS = 61;         // Clear all elements from Excalidraw canvas
+  EXCALIDRAW_UPDATE_ELEMENTS = 62;      // Update existing elements on canvas
+  EXCALIDRAW_REMOVE_HIGHLIGHTING = 63;  // Remove all highlighting from canvas
+  EXCALIDRAW_HIGHLIGHT_ELEMENTS_ADVANCED = 64; // Advanced highlighting with custom options
+  EXCALIDRAW_MODIFY_ELEMENTS = 65;      // Modify existing canvas elements
+  EXCALIDRAW_CAPTURE_SCREENSHOT = 66;   // Capture canvas screenshot
+  EXCALIDRAW_GET_CANVAS_ELEMENTS = 67;  // Get current canvas elements
+  EXCALIDRAW_SET_GENERATING = 68;       // Set generating state for UI
 }
 // Request from Agent to Client to perform a UI action
 message AgentToClientUIActionRequest {

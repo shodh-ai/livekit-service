@@ -458,6 +458,91 @@ class RoxAgent(Agent):
                     
                     self._expected_user_input_type = "SUBMISSION"
                     logger.info("State of Expectation set to: SUBMISSION")
+                
+                # --- EXCALIDRAW CANVAS ACTIONS ---
+                elif tool_name == 'clear_canvas':
+                    # Clear all elements from Excalidraw canvas
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                        logger.info("Cleared Excalidraw canvas")
+                    else:
+                        logger.warning("Frontend client not available - would clear canvas")
+                
+                elif tool_name == 'update_elements':
+                    # Update existing elements on canvas
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                        logger.info(f"Updated canvas elements: {len(parameters.get('elements', []))} elements")
+                    else:
+                        logger.warning(f"Frontend client not available - would update elements: {parameters}")
+                
+                elif tool_name == 'remove_highlighting':
+                    # Remove all highlighting from canvas
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                        logger.info("Removed canvas highlighting")
+                    else:
+                        logger.warning("Frontend client not available - would remove highlighting")
+                
+                elif tool_name == 'highlight_elements_advanced':
+                    # Advanced highlighting with custom options
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                        logger.info(f"Advanced highlighting: {parameters}")
+                    else:
+                        logger.warning(f"Frontend client not available - would do advanced highlighting: {parameters}")
+                
+                elif tool_name == 'modify_elements':
+                    # Modify existing canvas elements
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                        logger.info(f"Modified canvas elements: {len(parameters.get('modifications', []))} modifications")
+                    else:
+                        logger.warning(f"Frontend client not available - would modify elements: {parameters}")
+                
+                elif tool_name == 'capture_screenshot':
+                    # Capture canvas screenshot
+                    if self._frontend_client:
+                        result = await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                        logger.info("Captured canvas screenshot")
+                        return result
+                    else:
+                        logger.warning("Frontend client not available - would capture screenshot")
+                        return None
+                
+                elif tool_name == 'get_canvas_elements':
+                    # Get current canvas elements
+                    if self._frontend_client:
+                        result = await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                        logger.info("Retrieved canvas elements")
+                        return result
+                    else:
+                        logger.warning("Frontend client not available - would get canvas elements")
+                        return []
+                
+                elif tool_name == 'set_generating':
+                    # Set generating state for UI
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                        logger.info(f"Set generating state: {parameters.get('generating', False)}")
+                    else:
+                        logger.warning(f"Frontend client not available - would set generating: {parameters}")
                     
                     # The AI's turn is over - wait for student submission
                     break

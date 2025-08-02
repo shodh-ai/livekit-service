@@ -5,9 +5,9 @@ import warnings
 
 from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 from google.protobuf import wrappers_pb2 as google_dot_protobuf_dot_wrappers__pb2
-from protos import interaction_pb2 as protos_dot_interaction__pb2
+import interaction_pb2 as interaction__pb2
 
-GRPC_GENERATED_VERSION = '1.73.1'
+GRPC_GENERATED_VERSION = '1.74.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -20,7 +20,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in protos/interaction_pb2_grpc.py depends on'
+        + f' but the generated code in interaction_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -39,42 +39,42 @@ class AgentInteractionStub(object):
         """
         self.InvokeAgentTask = channel.unary_stream(
                 '/rox.interaction.AgentInteraction/InvokeAgentTask',
-                request_serializer=protos_dot_interaction__pb2.InvokeAgentTaskRequest.SerializeToString,
-                response_deserializer=protos_dot_interaction__pb2.AgentResponse.FromString,
+                request_serializer=interaction__pb2.InvokeAgentTaskRequest.SerializeToString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
                 _registered_method=True)
         self.RequestInterrupt = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/RequestInterrupt',
                 request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-                response_deserializer=protos_dot_interaction__pb2.AgentResponse.FromString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
                 _registered_method=True)
         self.TestPing = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/TestPing',
                 request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-                response_deserializer=protos_dot_interaction__pb2.AgentResponse.FromString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
                 _registered_method=True)
         self.UpdateAgentContext = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/UpdateAgentContext',
-                request_serializer=protos_dot_interaction__pb2.UpdateAgentContextRequest.SerializeToString,
-                response_deserializer=protos_dot_interaction__pb2.AgentResponse.FromString,
+                request_serializer=interaction__pb2.UpdateAgentContextRequest.SerializeToString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
                 _registered_method=True)
         self.HandleFrontendButton = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/HandleFrontendButton',
-                request_serializer=protos_dot_interaction__pb2.RpcInvocationData.SerializeToString,
+                request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
                 response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
                 _registered_method=True)
         self.NotifyPageLoad = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/NotifyPageLoad',
-                request_serializer=protos_dot_interaction__pb2.NotifyPageLoadRequest.SerializeToString,
-                response_deserializer=protos_dot_interaction__pb2.AgentResponse.FromString,
+                request_serializer=interaction__pb2.NotifyPageLoadRequest.SerializeToString,
+                response_deserializer=interaction__pb2.AgentResponse.FromString,
                 _registered_method=True)
         self.NotifyPageLoadV2 = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/NotifyPageLoadV2',
-                request_serializer=protos_dot_interaction__pb2.RpcInvocationData.SerializeToString,
+                request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
                 response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
                 _registered_method=True)
         self.HandlePushToTalk = channel.unary_unary(
                 '/rox.interaction.AgentInteraction/HandlePushToTalk',
-                request_serializer=protos_dot_interaction__pb2.RpcInvocationData.SerializeToString,
+                request_serializer=interaction__pb2.RpcInvocationData.SerializeToString,
                 response_deserializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
                 _registered_method=True)
 
@@ -136,42 +136,42 @@ def add_AgentInteractionServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'InvokeAgentTask': grpc.unary_stream_rpc_method_handler(
                     servicer.InvokeAgentTask,
-                    request_deserializer=protos_dot_interaction__pb2.InvokeAgentTaskRequest.FromString,
-                    response_serializer=protos_dot_interaction__pb2.AgentResponse.SerializeToString,
+                    request_deserializer=interaction__pb2.InvokeAgentTaskRequest.FromString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
             ),
             'RequestInterrupt': grpc.unary_unary_rpc_method_handler(
                     servicer.RequestInterrupt,
                     request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
-                    response_serializer=protos_dot_interaction__pb2.AgentResponse.SerializeToString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
             ),
             'TestPing': grpc.unary_unary_rpc_method_handler(
                     servicer.TestPing,
                     request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
-                    response_serializer=protos_dot_interaction__pb2.AgentResponse.SerializeToString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
             ),
             'UpdateAgentContext': grpc.unary_unary_rpc_method_handler(
                     servicer.UpdateAgentContext,
-                    request_deserializer=protos_dot_interaction__pb2.UpdateAgentContextRequest.FromString,
-                    response_serializer=protos_dot_interaction__pb2.AgentResponse.SerializeToString,
+                    request_deserializer=interaction__pb2.UpdateAgentContextRequest.FromString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
             ),
             'HandleFrontendButton': grpc.unary_unary_rpc_method_handler(
                     servicer.HandleFrontendButton,
-                    request_deserializer=protos_dot_interaction__pb2.RpcInvocationData.FromString,
+                    request_deserializer=interaction__pb2.RpcInvocationData.FromString,
                     response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
             ),
             'NotifyPageLoad': grpc.unary_unary_rpc_method_handler(
                     servicer.NotifyPageLoad,
-                    request_deserializer=protos_dot_interaction__pb2.NotifyPageLoadRequest.FromString,
-                    response_serializer=protos_dot_interaction__pb2.AgentResponse.SerializeToString,
+                    request_deserializer=interaction__pb2.NotifyPageLoadRequest.FromString,
+                    response_serializer=interaction__pb2.AgentResponse.SerializeToString,
             ),
             'NotifyPageLoadV2': grpc.unary_unary_rpc_method_handler(
                     servicer.NotifyPageLoadV2,
-                    request_deserializer=protos_dot_interaction__pb2.RpcInvocationData.FromString,
+                    request_deserializer=interaction__pb2.RpcInvocationData.FromString,
                     response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
             ),
             'HandlePushToTalk': grpc.unary_unary_rpc_method_handler(
                     servicer.HandlePushToTalk,
-                    request_deserializer=protos_dot_interaction__pb2.RpcInvocationData.FromString,
+                    request_deserializer=interaction__pb2.RpcInvocationData.FromString,
                     response_serializer=google_dot_protobuf_dot_wrappers__pb2.StringValue.SerializeToString,
             ),
     }
@@ -201,8 +201,8 @@ class AgentInteraction(object):
             request,
             target,
             '/rox.interaction.AgentInteraction/InvokeAgentTask',
-            protos_dot_interaction__pb2.InvokeAgentTaskRequest.SerializeToString,
-            protos_dot_interaction__pb2.AgentResponse.FromString,
+            interaction__pb2.InvokeAgentTaskRequest.SerializeToString,
+            interaction__pb2.AgentResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -229,7 +229,7 @@ class AgentInteraction(object):
             target,
             '/rox.interaction.AgentInteraction/RequestInterrupt',
             google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-            protos_dot_interaction__pb2.AgentResponse.FromString,
+            interaction__pb2.AgentResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -256,7 +256,7 @@ class AgentInteraction(object):
             target,
             '/rox.interaction.AgentInteraction/TestPing',
             google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-            protos_dot_interaction__pb2.AgentResponse.FromString,
+            interaction__pb2.AgentResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -282,8 +282,8 @@ class AgentInteraction(object):
             request,
             target,
             '/rox.interaction.AgentInteraction/UpdateAgentContext',
-            protos_dot_interaction__pb2.UpdateAgentContextRequest.SerializeToString,
-            protos_dot_interaction__pb2.AgentResponse.FromString,
+            interaction__pb2.UpdateAgentContextRequest.SerializeToString,
+            interaction__pb2.AgentResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -309,7 +309,7 @@ class AgentInteraction(object):
             request,
             target,
             '/rox.interaction.AgentInteraction/HandleFrontendButton',
-            protos_dot_interaction__pb2.RpcInvocationData.SerializeToString,
+            interaction__pb2.RpcInvocationData.SerializeToString,
             google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
             options,
             channel_credentials,
@@ -336,8 +336,8 @@ class AgentInteraction(object):
             request,
             target,
             '/rox.interaction.AgentInteraction/NotifyPageLoad',
-            protos_dot_interaction__pb2.NotifyPageLoadRequest.SerializeToString,
-            protos_dot_interaction__pb2.AgentResponse.FromString,
+            interaction__pb2.NotifyPageLoadRequest.SerializeToString,
+            interaction__pb2.AgentResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -363,7 +363,7 @@ class AgentInteraction(object):
             request,
             target,
             '/rox.interaction.AgentInteraction/NotifyPageLoadV2',
-            protos_dot_interaction__pb2.RpcInvocationData.SerializeToString,
+            interaction__pb2.RpcInvocationData.SerializeToString,
             google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
             options,
             channel_credentials,
@@ -390,7 +390,7 @@ class AgentInteraction(object):
             request,
             target,
             '/rox.interaction.AgentInteraction/HandlePushToTalk',
-            protos_dot_interaction__pb2.RpcInvocationData.SerializeToString,
+            interaction__pb2.RpcInvocationData.SerializeToString,
             google_dot_protobuf_dot_wrappers__pb2.StringValue.FromString,
             options,
             channel_credentials,
@@ -415,8 +415,8 @@ class ClientSideUIStub(object):
         """
         self.PerformUIAction = channel.unary_unary(
                 '/rox.interaction.ClientSideUI/PerformUIAction',
-                request_serializer=protos_dot_interaction__pb2.AgentToClientUIActionRequest.SerializeToString,
-                response_deserializer=protos_dot_interaction__pb2.ClientUIActionResponse.FromString,
+                request_serializer=interaction__pb2.AgentToClientUIActionRequest.SerializeToString,
+                response_deserializer=interaction__pb2.ClientUIActionResponse.FromString,
                 _registered_method=True)
 
 
@@ -435,8 +435,8 @@ def add_ClientSideUIServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'PerformUIAction': grpc.unary_unary_rpc_method_handler(
                     servicer.PerformUIAction,
-                    request_deserializer=protos_dot_interaction__pb2.AgentToClientUIActionRequest.FromString,
-                    response_serializer=protos_dot_interaction__pb2.ClientUIActionResponse.SerializeToString,
+                    request_deserializer=interaction__pb2.AgentToClientUIActionRequest.FromString,
+                    response_serializer=interaction__pb2.ClientUIActionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -465,8 +465,8 @@ class ClientSideUI(object):
             request,
             target,
             '/rox.interaction.ClientSideUI/PerformUIAction',
-            protos_dot_interaction__pb2.AgentToClientUIActionRequest.SerializeToString,
-            protos_dot_interaction__pb2.ClientUIActionResponse.FromString,
+            interaction__pb2.AgentToClientUIActionRequest.SerializeToString,
+            interaction__pb2.ClientUIActionResponse.FromString,
             options,
             channel_credentials,
             insecure,
