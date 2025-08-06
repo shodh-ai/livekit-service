@@ -73,6 +73,53 @@ class AgentInteractionService:
             )
             return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
+    async def student_mic_button_interrupt(self, raw_payload: RpcInvocationData) -> str:
+        """Handle mic button press interruption from the student.
+        
+        This is triggered when the student clicks the mic button to interrupt
+        the AI's speech and indicate they want to speak.
+        
+        Args:
+            raw_payload: The raw RPC payload
+            
+        Returns:
+            Base64-encoded protobuf response
+        """
+        logger.info("[RPC] Received student_mic_button_interrupt")
+        
+        try:
+            # Try to stop any ongoing TTS (but don't fail if it's not interruptible)
+            if self.agent and self.agent.agent_session:
+                try:
+                    self.agent.agent_session.interrupt()
+                    logger.info("Interrupted ongoing agent speech via mic button")
+                except RuntimeError as interrupt_error:
+                    logger.warning(f"Could not interrupt current speech (not interruptible): {interrupt_error}")
+                    # Continue anyway - the interrupt signal is still valid
+            
+            # Queue the mic interrupt task for the Brain (this should always work)
+            if self.agent:
+                task = {
+                    "task_name": "student_mic_button_interrupt",
+                    "caller_identity": raw_payload.caller_identity,
+                    "interrupt_type": "mic_button",
+                    "interaction_type": "interruption"  # This routes to /handle_interruption endpoint
+                }
+                await self.agent._processing_queue.put(task)
+                logger.info("Queued mic button interrupt task for Brain processing")
+
+            response_pb = interaction_pb2.AgentResponse(
+                status_message="Mic interrupt acknowledged. You may speak now."
+            )
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Error in student_mic_button_interrupt: {e}", exc_info=True)
+            error_response = interaction_pb2.AgentResponse(
+                status_message=f"Error processing mic interrupt: {str(e)}"
+            )
+            return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
+
     async def student_spoke_or_acted(self, raw_payload: RpcInvocationData) -> str:
         """Handle enriched student input from the Frontend Sensor.
         
@@ -147,15 +194,14 @@ class AgentInteractionService:
         logger.info("[RPC] Received TestPing")
         
         try:
-            # Also queue a test task for LangGraph to verify end-to-end flow
+            # Queue session start task to trigger curriculum navigation
             if self.agent:
-                test_task = {
-                    "task_name": "rox_conversation_turn",
-                    "transcript": "Hello! This is a test message from TestPing to verify LangGraph integration.",
+                session_start_task = {
+                    "task_name": "start_tutoring_session",
                     "caller_identity": raw_payload.caller_identity,
                 }
-                await self.agent._processing_queue.put(test_task)
-                logger.info("[TestPing] Queued test task for LangGraph processing")
+                await self.agent._processing_queue.put(session_start_task)
+                logger.info("[TestPing] Queued session start task to trigger curriculum navigation")
             
             response = interaction_pb2.AgentResponse(
                 status_message="Pong! Conductor is alive and responding. Test task queued for LangGraph."

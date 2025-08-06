@@ -15,50 +15,68 @@ logger = logging.getLogger(__name__)
 
 class LangGraphClient:
     def __init__(self):
-        self.url = os.getenv("LANGGRAPH_BRAIN_URL", "http://localhost:8080/invoke_task_streaming")
+        # The URL should point to your new Student Tutor agent's base
+        self.base_url = os.getenv("LANGGRAPH_TUTOR_URL", "http://localhost:8002")
         self.timeout = aiohttp.ClientTimeout(total=120.0)
 
-    async def invoke_langgraph_task(self, task: Dict, user_id: str, session_id: str) -> Optional[List[Dict[str, Any]]]:
+    # --- SIGNATURE CHANGE ---
+    async def invoke_langgraph_task(self, task: Dict, user_id: str, expert_id: str, session_id: str) -> Optional[Dict[str, Any]]:
         """
-        Invoke a task with LangGraph and return the final toolbelt.
+        Invoke a task with LangGraph and return the final state.
         
         Args:
             task: The task dictionary containing task_name and other parameters
-            user_id: The user identifier
+            user_id: The student identifier
+            expert_id: The expert identifier for the current course
             session_id: The session identifier
             
         Returns:
-            List of actions (toolbelt) to execute, or None if failed
+            The final state dictionary from the graph, or None if failed.
         """
-        logger.info(f"Invoking LangGraph with task: {task.get('task_name')}")
+        logger.info(f"Invoking Brum-langgraph with task: {task.get('task_name')}")
         
-        # Construct the request body to match Brain API format
-        json_payload = {
-            "current_context": {
-                "user_id": user_id,
-                "session_id": session_id
-            },
-            "transcript": task.get("transcript", "Hello")  # Default greeting if no transcript
-        }
-        
+        # --- PAYLOAD CHANGE: expert_id is now dynamic ---
         request_body = {
-            "task_name": task.get("task_name", "rox_conversation_turn"),
-            "json_payload": json.dumps(json_payload)
+            "student_id": user_id,
+            "expert_id": expert_id,  # No longer hardcoded
+            "current_lo_id": task.get("current_lo_id", None),  # Pass along the current topic
+            "student_input": task.get("transcript", "")
         }
 
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.post(self.url, json=request_body) as response:
+                # Route to appropriate endpoint based on task type
+                if task.get("task_name") == "start_tutoring_session":
+                    endpoint = "/start_session"
+                    # For session start, we don't need student_input
+                    request_body = {
+                        "student_id": user_id,
+                        "expert_id": expert_id,
+                        "current_lo_id": task.get("current_lo_id", None)
+                    }
+                elif task.get("interaction_type") == "interruption":
+                    endpoint = "/handle_interruption"
+                else:
+                    endpoint = "/handle_response"
+                
+                # --- ROBUSTNESS CHANGE: Construct URL safely ---
+                full_url = f"{self.base_url}{endpoint}"
+
+                async with session.post(full_url, json=request_body) as response:
                     response.raise_for_status()
                     
-                    # Parse the SSE stream to find the final toolbelt
-                    final_toolbelt = await self._parse_sse_stream(response)
+                    # This is where you would check for a streaming response vs. a JSON one.
+                    # For now, we handle the JSON response correctly.
                     
-                    if final_toolbelt:
-                        logger.info(f"Received toolbelt with {len(final_toolbelt)} actions")
-                        return final_toolbelt
+                    response_data = await response.json()
+                    
+                    # --- BUG FIX: Return the whole response data ---
+                    # The main agent loop will be responsible for parsing the delivery_plan and current_lo_id
+                    if response_data:
+                        logger.info(f"Received response from Brum-langgraph service: {response_data}")
+                        return response_data
                     else:
-                        logger.warning("No toolbelt received from LangGraph")
+                        logger.warning("No data received from Brum-langgraph service")
                         return None
                         
         except aiohttp.ClientError as e:

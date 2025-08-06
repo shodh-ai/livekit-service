@@ -209,6 +209,8 @@ class RoxAgent(Agent):
         self.user_id: Optional[str] = None
         self.session_id: Optional[str] = None
         self.caller_identity: Optional[str] = None  # The participant ID of the frontend
+        self.expert_id: str = "ai_business_expert_424d7f"  # Default expert, can be set dynamically
+        self.current_lo_id: Optional[str] = None  # Current learning objective ID
         
         # State of Expectation - determines how to interpret student input
         self._expected_user_input_type: str = "INTERRUPTION"  # Default state
@@ -238,34 +240,57 @@ class RoxAgent(Agent):
         """The main engine of the Conductor.
         
         This loop continuously processes tasks from the queue:
-        1. Receives task from RPC handlers
-        2. Sends task to Brain (LangGraph) for processing
-        3. Executes the returned script via Unified Action Executor
+        1. Receives task from RPC handlers or TranscriptInterceptor
+        2. Adds session context (user_id, expert_id, lo_id) to the task
+        3. Sends task to Brain (LangGraph) for processing
+        4. Parses the returned state to update its own session context (the new lo_id)
+        5. Executes the returned action script (the delivery_plan)
         """
         logger.info("Conductor's main processing loop started")
         
         while True:
             try:
-                # Wait for a task to be queued
+                # Wait for a task to be queued (from user speech or RPC)
                 task = await self._processing_queue.get()
                 logger.info(f"DEQUEUED TASK: {json.dumps(task, indent=2)}")
 
-                # 1. Ask the Brain for the script (toolbelt)
+                # --- Add current_lo_id to the task payload for the client ---
+                # This ensures the client always sends the most current topic
+                task["current_lo_id"] = self.current_lo_id
+
+                # 1. Ask the Brain for the next state and actions
                 logger.info(f"Forwarding task to LangGraph: {task.get('task_name')}")
-                toolbelt = await self._langgraph_client.invoke_langgraph_task(
+                
+                # --- Call the updated client signature ---
+                final_state = await self._langgraph_client.invoke_langgraph_task(
                     task=task,
-                    user_id=self.user_id or "anonymous",
+                    user_id=self.user_id or "anonymous_student",
+                    expert_id=self.expert_id or "default_expert",
                     session_id=self.session_id or "default_session"
                 )
                 
-                logger.info(f"RECEIVED TOOLBELT FROM BRAIN: {json.dumps(toolbelt, indent=2)}")
-
-                if not toolbelt:
-                    logger.error("Received empty toolbelt from Brain. Skipping turn.")
+                if not final_state:
+                    logger.error("Received empty response from Brain. Skipping turn.")
+                    self._processing_queue.task_done()
                     continue
 
-                # 2. Execute the script via Unified Action Executor
-                await self._execute_toolbelt(toolbelt)
+                # --- Parse the full state dictionary, not just a toolbelt ---
+                logger.info(f"RECEIVED FINAL STATE FROM BRAIN: {json.dumps(final_state, indent=2)}")
+
+                # 2. Update the Conductor's own state from the Brain's response
+                new_lo_id = final_state.get("current_lo_id")
+                if new_lo_id and new_lo_id != self.current_lo_id:
+                    self.current_lo_id = new_lo_id
+                    logger.info(f"SESSION CONTEXT UPDATED. New current_lo_id is: {self.current_lo_id}")
+
+                # 3. Extract the action script (delivery_plan) and execute it
+                delivery_plan = final_state.get("delivery_plan", {})
+                actions = delivery_plan.get("actions", [])
+                
+                if not actions:
+                    logger.warning("No actions found in the delivery plan from the Brain.")
+                else:
+                    await self._execute_toolbelt(actions)
                 
                 # Mark task as done
                 self._processing_queue.task_done()
@@ -697,6 +722,25 @@ async def entrypoint(ctx: JobContext):
     ctx.rox_agent = rox_agent_instance  # Make agent findable by RPC service
     rox_agent_instance._room = ctx.room
     
+    # --- NEW: Read metadata from the token and populate agent state ---
+    try:
+        local_participant = ctx.room.local_participant
+        metadata_str = local_participant.metadata
+        metadata = json.loads(metadata_str) if metadata_str else {}
+        
+        # Populate the agent's session state from token metadata
+        rox_agent_instance.user_id = metadata.get("student_id") or metadata.get("user_id") or "skill_test_student_01"
+        if metadata.get("expert_id"):
+            rox_agent_instance.expert_id = metadata.get("expert_id")
+        else:
+            # Fallback to test expert ID for local testing
+            rox_agent_instance.expert_id = "ai_business_expert_424d7f"
+        rox_agent_instance.current_lo_id = metadata.get("initial_lo_id")  # Good practice to have an initial topic
+        
+        logger.info(f"Agent state populated from metadata: user_id={rox_agent_instance.user_id}, expert_id={rox_agent_instance.expert_id}, current_lo_id={rox_agent_instance.current_lo_id}")
+    except Exception as e:
+        logger.warning(f"Could not parse token metadata, using defaults: {e}")
+    
     # Create AgentSession with audio capabilities and LLM interceptor
     # The LLM interceptor will process user speech and forward to LangGraph
     main_agent_session = agents.AgentSession(
@@ -725,6 +769,10 @@ async def entrypoint(ctx: JobContext):
         local_participant.register_rpc_method(
             f"{service_name}/student_wants_to_interrupt", 
             agent_rpc_service.student_wants_to_interrupt
+        )
+        local_participant.register_rpc_method(
+            f"{service_name}/student_mic_button_interrupt", 
+            agent_rpc_service.student_mic_button_interrupt
         )
         local_participant.register_rpc_method(
             f"{service_name}/student_spoke_or_acted", 
@@ -778,6 +826,35 @@ async def entrypoint(ctx: JobContext):
         room=ctx.room,
         agent=rox_agent_instance,
     )
+    
+    # --- THIS IS THE NEW PROACTIVE START LOGIC ---
+    logger.info("Agent is live. Checking for student to initiate conversation.")
+    try:
+        # Give a moment for the frontend participant to be fully connected.
+        await asyncio.sleep(2)
+        
+        if len(ctx.room.remote_participants) > 0:
+            # We already have the student's identity from the handshake check
+            if not rox_agent_instance.caller_identity:
+                 rox_agent_instance.caller_identity = list(ctx.room.remote_participants.keys())[0]
+
+            logger.info(f"Student '{rox_agent_instance.caller_identity}' is present. Queueing proactive start task.")
+            
+            # Create a special, predefined task.
+            # CRITICAL: It has NO 'transcript' because the student hasn't spoken.
+            initial_task = {
+                "task_name": "start_tutoring_session",
+                "caller_identity": rox_agent_instance.caller_identity
+            }
+            
+            # Queue this initial task. The processing_loop will pick it up.
+            await rox_agent_instance._processing_queue.put(initial_task)
+            
+        else:
+            logger.warning("No student in the room. Agent will wait for a participant to join.")
+
+    except Exception as e:
+        logger.error(f"Failed during proactive start sequence: {e}", exc_info=True)
     
     # Keep the agent alive by waiting for the processing task
     await processing_task
