@@ -47,19 +47,17 @@ class AgentInteractionService:
         logger.info("[RPC] Received student_wants_to_interrupt")
         
         try:
-            # Immediately stop any ongoing TTS
-            if self.agent and self.agent.agent_session:
-                self.agent.agent_session.interrupt()
-                logger.info("Interrupted ongoing agent speech")
-            
-            # Queue the interrupt task for the Brain
+            # Use the new dedicated interruption handler
             if self.agent:
                 task = {
                     "task_name": "student_wants_to_interrupt",
-                    "caller_identity": raw_payload.caller_identity
+                    "caller_identity": raw_payload.caller_identity,
+                    "interrupt_type": "voice",
+                    "interaction_type": "interruption"
                 }
-                await self.agent._processing_queue.put(task)
-                logger.info("Queued interrupt task for Brain processing")
+                # Use the new interruption handler that stops current execution and forwards immediately
+                await self.agent.handle_interruption(task)
+                logger.info("Handled voice interrupt with stop-and-forward logic")
 
             response_pb = interaction_pb2.AgentResponse(
                 status_message="Interrupt acknowledged. You may speak now."
@@ -88,16 +86,7 @@ class AgentInteractionService:
         logger.info("[RPC] Received student_mic_button_interrupt")
         
         try:
-            # Try to stop any ongoing TTS (but don't fail if it's not interruptible)
-            if self.agent and self.agent.agent_session:
-                try:
-                    self.agent.agent_session.interrupt()
-                    logger.info("Interrupted ongoing agent speech via mic button")
-                except RuntimeError as interrupt_error:
-                    logger.warning(f"Could not interrupt current speech (not interruptible): {interrupt_error}")
-                    # Continue anyway - the interrupt signal is still valid
-            
-            # Queue the mic interrupt task for the Brain (this should always work)
+            # Use the new dedicated interruption handler
             if self.agent:
                 task = {
                     "task_name": "student_mic_button_interrupt",
@@ -105,8 +94,9 @@ class AgentInteractionService:
                     "interrupt_type": "mic_button",
                     "interaction_type": "interruption"  # This routes to /handle_interruption endpoint
                 }
-                await self.agent._processing_queue.put(task)
-                logger.info("Queued mic button interrupt task for Brain processing")
+                # Use the new interruption handler that stops current execution and forwards immediately
+                await self.agent.handle_interruption(task)
+                logger.info("Handled mic button interrupt with stop-and-forward logic")
 
             response_pb = interaction_pb2.AgentResponse(
                 status_message="Mic interrupt acknowledged. You may speak now."

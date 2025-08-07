@@ -215,6 +215,10 @@ class RoxAgent(Agent):
         # State of Expectation - determines how to interpret student input
         self._expected_user_input_type: str = "INTERRUPTION"  # Default state
         
+        # Interruption handling
+        self._interruption_pending: bool = False
+        self._current_execution_cancelled: bool = False
+        
         # Processing queue for tasks from the Brain
         self._processing_queue: asyncio.Queue = asyncio.Queue()
         
@@ -287,6 +291,12 @@ class RoxAgent(Agent):
                 delivery_plan = final_state.get("delivery_plan", {})
                 actions = delivery_plan.get("actions", [])
                 
+                # Reset cancellation flag before executing interruption response
+                # This ensures interruption responses (speak, listen, etc.) always run
+                if task.get("interaction_type") == "interruption":
+                    self._current_execution_cancelled = False
+                    logger.info("[INTERRUPTION] Reset cancellation flag - interruption response will execute fully")
+                
                 if not actions:
                     logger.warning("No actions found in the delivery plan from the Brain.")
                 else:
@@ -314,6 +324,12 @@ class RoxAgent(Agent):
         optimized_toolbelt = self._optimize_speech_actions(toolbelt)
         
         for i, action in enumerate(optimized_toolbelt):
+            # Check for interruption before each action
+            if self._current_execution_cancelled:
+                logger.info(f"Execution cancelled due to interruption. Stopping at action {i+1}/{len(toolbelt)}")
+                self._current_execution_cancelled = False  # Reset for next execution
+                return
+            
             tool_name = action.get("tool_name")
             parameters = action.get("parameters", {})
             
@@ -483,6 +499,16 @@ class RoxAgent(Agent):
                     # Set expectation state to wait for interruptions
                     self._expected_user_input_type = "INTERRUPTION"
                     logger.info("State of Expectation set to: INTERRUPTION")
+                    
+                    # Also enable microphone in frontend to allow student to speak
+                    if self._frontend_client:
+                        await self._frontend_client.set_mic_enabled(
+                            self._room, self.caller_identity, True,
+                            message="You may speak now..."
+                        )
+                        logger.info("[LISTEN] Enabled microphone for student input")
+                    else:
+                        logger.warning("[LISTEN] Frontend client not available - microphone not enabled")
                 
                 elif tool_name == "START_LISTENING_VISUAL":
                     # Enable microphone via frontend RPC
@@ -696,6 +722,38 @@ class RoxAgent(Agent):
             await self.speak_text(text)
         self._expected_user_input_type = "INTERRUPTION"
 
+    async def handle_interruption(self, task: Dict[str, Any]):
+        """Handle interruption by stopping current execution and forwarding to Brain.
+        
+        Args:
+            task: The interruption task dictionary
+        """
+        logger.info(f"[INTERRUPTION] Handling interruption: {task.get('task_name')}")
+        
+        # 1. Stop current execution immediately
+        self._current_execution_cancelled = True
+        
+        # 2. Try to interrupt any ongoing TTS
+        if self.agent_session:
+            try:
+                self.agent_session.interrupt()
+                logger.info("[INTERRUPTION] Stopped ongoing TTS")
+            except RuntimeError as e:
+                logger.warning(f"[INTERRUPTION] Could not interrupt TTS: {e}")
+        
+        # 3. Clear any pending tasks in the queue (interruption takes priority)
+        while not self._processing_queue.empty():
+            try:
+                discarded_task = self._processing_queue.get_nowait()
+                logger.info(f"[INTERRUPTION] Discarded pending task: {discarded_task.get('task_name')}")
+                self._processing_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        
+        # 4. Immediately forward interruption to Brain with priority
+        logger.info(f"[INTERRUPTION] Forwarding to Brain: {task.get('task_name')}")
+        await self._processing_queue.put(task)
+
     async def trigger_langgraph_task(self, task_name: str, json_payload: str, caller_identity: str):
         """Queue a task for processing by the Brain.
         
@@ -751,7 +809,7 @@ async def entrypoint(ctx: JobContext):
         metadata = json.loads(metadata_str) if metadata_str else {}
         
         # Populate the agent's session state from token metadata
-        rox_agent_instance.user_id = metadata.get("student_id") or metadata.get("user_id") or "skill_test_student_01"
+        rox_agent_instance.user_id = metadata.get("student_id") or metadata.get("user_id") or "skill_test_student_671"
         if metadata.get("expert_id"):
             rox_agent_instance.expert_id = metadata.get("expert_id")
         else:

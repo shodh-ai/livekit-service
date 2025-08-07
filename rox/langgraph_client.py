@@ -50,8 +50,13 @@ class LangGraphClient:
                     # For session start, use base request body (no student_input needed)
                 elif task.get("interaction_type") == "interruption":
                     endpoint = "/handle_interruption"
-                    # Add student_input for interruption
-                    request_body["student_input"] = task.get("transcript", "")
+                    # Handle different interruption types with appropriate student_input
+                    if task.get("interrupt_type") == "mic_button":
+                        # Mic button interruption - provide meaningful signal
+                        request_body["student_input"] = "[Student pressed mic button to interrupt]"
+                    else:
+                        # Voice interruption - use transcript or fallback
+                        request_body["student_input"] = task.get("transcript", "[Student interrupted]")
                 else:
                     endpoint = "/handle_response"
                     # Add student_input for regular response
