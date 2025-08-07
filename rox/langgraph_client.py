@@ -22,7 +22,7 @@ class LangGraphClient:
     # --- SIGNATURE CHANGE ---
     async def invoke_langgraph_task(self, task: Dict, user_id: str, expert_id: str, session_id: str) -> Optional[Dict[str, Any]]:
         """
-        Invoke a task with LangGraph and return the final state.
+        Invoke a task with LangGraph and return the delivery plan.
         
         Args:
             task: The task dictionary containing task_name and other parameters
@@ -31,16 +31,15 @@ class LangGraphClient:
             session_id: The session identifier
             
         Returns:
-            The final state dictionary from the graph, or None if failed.
+            The response dictionary containing delivery_plan, or None if failed.
         """
-        logger.info(f"Invoking Brum-langgraph with task: {task.get('task_name')}")
+        logger.info(f"Invoking LangGraph with task: {task.get('task_name')}")
         
-        # --- PAYLOAD CHANGE: expert_id is now dynamic ---
+        # Base request body for all endpoints
         request_body = {
             "student_id": user_id,
-            "expert_id": expert_id,  # No longer hardcoded
-            "current_lo_id": task.get("current_lo_id", None),  # Pass along the current topic
-            "student_input": task.get("transcript", "")
+            "expert_id": expert_id,
+            "current_lo_id": task.get("current_lo_id", None)
         }
 
         try:
@@ -48,16 +47,15 @@ class LangGraphClient:
                 # Route to appropriate endpoint based on task type
                 if task.get("task_name") == "start_tutoring_session":
                     endpoint = "/start_session"
-                    # For session start, we don't need student_input
-                    request_body = {
-                        "student_id": user_id,
-                        "expert_id": expert_id,
-                        "current_lo_id": task.get("current_lo_id", None)
-                    }
+                    # For session start, use base request body (no student_input needed)
                 elif task.get("interaction_type") == "interruption":
                     endpoint = "/handle_interruption"
+                    # Add student_input for interruption
+                    request_body["student_input"] = task.get("transcript", "")
                 else:
                     endpoint = "/handle_response"
+                    # Add student_input for regular response
+                    request_body["student_input"] = task.get("transcript", "")
                 
                 # --- ROBUSTNESS CHANGE: Construct URL safely ---
                 full_url = f"{self.base_url}{endpoint}"
@@ -65,18 +63,20 @@ class LangGraphClient:
                 async with session.post(full_url, json=request_body) as response:
                     response.raise_for_status()
                     
-                    # This is where you would check for a streaming response vs. a JSON one.
-                    # For now, we handle the JSON response correctly.
-                    
                     response_data = await response.json()
                     
-                    # --- BUG FIX: Return the whole response data ---
-                    # The main agent loop will be responsible for parsing the delivery_plan and current_lo_id
-                    if response_data:
-                        logger.info(f"Received response from Brum-langgraph service: {response_data}")
-                        return response_data
+                    # The actual LangGraph service returns {"delivery_plan": delivery_plan}
+                    # We need to wrap it in the format the main agent loop expects
+                    if response_data and "delivery_plan" in response_data:
+                        logger.info(f"Received response from LangGraph service: delivery_plan with {len(response_data['delivery_plan'].get('actions', []))} actions")
+                        
+                        # Return in the format expected by main.py
+                        return {
+                            "delivery_plan": response_data["delivery_plan"],
+                            "current_lo_id": task.get("current_lo_id")  # Preserve current_lo_id
+                        }
                     else:
-                        logger.warning("No data received from Brum-langgraph service")
+                        logger.warning("No delivery_plan received from LangGraph service")
                         return None
                         
         except aiohttp.ClientError as e:
