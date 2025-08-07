@@ -269,3 +269,25 @@ class FrontendClient:
         params = {}
         response = await self._send_rpc(room, identity, "CLEAR_ALL_ANNOTATIONS", params)
         return response is not None and response.success
+
+    async def set_mic_enabled(self, room: rtc.Room, identity: str, enabled: bool, message: str = "") -> bool:
+        """
+        Enable or disable the student's microphone from the backend.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            enabled: True to enable mic, False to disable
+            message: Optional message to show to the student
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Use the existing action types that the frontend already supports
+        action_type = "START_LISTENING_VISUAL" if enabled else "STOP_LISTENING_VISUAL"
+        params = {
+            "message": message
+        } if message else {}
+        
+        response = await self._send_rpc(room, identity, action_type, params)
+        return response is not None and response.success

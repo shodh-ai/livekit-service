@@ -333,7 +333,7 @@ class RoxAgent(Agent):
                     # Use LiveKit's proven .say() method for all speech
                     text = parameters.get("text", "")
                     if text and self.agent_session:
-                        await self.agent_session.say(text, allow_interruptions=False)
+                        await self.agent_session.say(text, allow_interruptions=True)
                         logger.info(f"Spoke with LiveKit: {text[:50]}...")
                     else:
                         logger.warning("No text to speak or agent_session not available")
@@ -483,6 +483,28 @@ class RoxAgent(Agent):
                     # Set expectation state to wait for interruptions
                     self._expected_user_input_type = "INTERRUPTION"
                     logger.info("State of Expectation set to: INTERRUPTION")
+                
+                elif tool_name == "START_LISTENING_VISUAL":
+                    # Enable microphone via frontend RPC
+                    if self._frontend_client:
+                        await self._frontend_client.set_mic_enabled(
+                            self._room, self.caller_identity, True,
+                            message=parameters.get('message', '')
+                        )
+                        logger.info(f"Enabled microphone: {parameters.get('message', '')}")
+                    else:
+                        logger.warning(f"Frontend client not available - would enable mic: {parameters.get('message', '')}")
+                
+                elif tool_name == "STOP_LISTENING_VISUAL":
+                    # Disable microphone via frontend RPC
+                    if self._frontend_client:
+                        await self._frontend_client.set_mic_enabled(
+                            self._room, self.caller_identity, False,
+                            message=parameters.get('message', '')
+                        )
+                        logger.info(f"Disabled microphone: {parameters.get('message', '')}")
+                    else:
+                        logger.warning(f"Frontend client not available - would disable mic: {parameters.get('message', '')}")
                 
                 elif tool_name == "prompt_for_student_action":
                     # Prompt student and wait for specific submission
