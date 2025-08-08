@@ -22,7 +22,7 @@ class GeminiTTSProvider(agents.tts.TTS):
     This allows seamless integration with agent.say() calls.
     """
     
-    def __init__(self, *, model: str = "gemini-2.0-flash-exp", api_key: Optional[str] = None):
+    def __init__(self, *, model: str = "gemini-2.5-flash-exp", api_key: Optional[str] = None):
         super().__init__(
             capabilities=agents.tts.TTSCapabilities(
                 streaming=False,  # Gemini doesn't support streaming TTS yet

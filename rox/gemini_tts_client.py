@@ -19,7 +19,7 @@ class GeminiTTSClient:
     """Client for Gemini 2.5 Flash TTS with emotional intelligence."""
     
     def __init__(self):
-        self.model_id = "gemini-2.0-flash-exp"  # Updated model ID
+        self.model_id = "gemini-2.5-flash-exp"  # Updated model ID
         self.api_key = os.getenv("GOOGLE_API_KEY")
         
         if not self.api_key:

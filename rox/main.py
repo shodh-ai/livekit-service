@@ -307,16 +307,21 @@ class RoxAgent(Agent):
                 else:
                     await self._execute_toolbelt(actions)
 
-                # 4. Handle meta_action (e.g., RESUME) from Brain
+                # --- REFACTORED LOGIC ---
+                # After an interruption, the brain's response IS the plan. We just run it.
+                # The 'RESUME' meta_action tells us that the OLD plan is still valid.
                 meta_action = delivery_plan.get("meta_action") if isinstance(delivery_plan, dict) else None
-                if meta_action == "RESUME":
-                    logger.info("[META] Received RESUME. Unpausing and resuming previous plan if available.")
+
+                if task.get("interaction_type") == "interruption":
+                    # For an interruption, we un-pause the state, allowing the NEXT turn
+                    # to potentially resume the original plan if the student gives a go-ahead.
                     self._is_paused = False
-                    # Continue from next action of the stored plan
-                    if self._current_delivery_plan is not None:
-                        start_idx = min(self._current_plan_index + 1, len(self._current_delivery_plan))
-                        if start_idx < len(self._current_delivery_plan):
-                            await self._execute_toolbelt(self._current_delivery_plan[start_idx:])
+                    if meta_action != "DISCARD":
+                        logger.info("[META] Interruption handled. Original plan is kept for potential future resumption.")
+                    else:
+                        logger.info("[META] Brain instructed to discard original plan.")
+                        self._current_delivery_plan = None  # Discard the old plan
+                # --- END REFACTORED LOGIC ---
                 
                 # Mark task as done
                 self._processing_queue.task_done()
@@ -370,11 +375,17 @@ class RoxAgent(Agent):
                         logger.info(f"Frontend client not available - would set UI state: {parameters}")
                 
                 elif tool_name == "speak" or tool_name == "speak_text":
-                    # Use LiveKit's proven .say() method for all speech
                     text = parameters.get("text", "")
                     if text and self.agent_session:
-                        await self.agent_session.say(text, allow_interruptions=True)
-                        logger.info(f"Spoke with LiveKit: {text[:50]}...")
+                        # 1. Get the handle for the playback
+                        playback_handle = await self.agent_session.say(
+                            text, allow_interruptions=True
+                        )
+                        logger.info(f"Started speaking with LiveKit: {text[:50]}...")
+                        
+                        # 2. CRITICAL FIX: Wait for this specific playback to complete
+                        await playback_handle.done()
+                        logger.info("Finished speaking.")
                     else:
                         logger.warning("No text to speak or agent_session not available")
                 
