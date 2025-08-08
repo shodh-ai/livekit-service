@@ -2,7 +2,7 @@
 # rox/langgraph_client.py
 """
 LangGraph client for communicating with the Brain service.
-Handles task invocation and streaming response parsing.
+Handles task invocation and response parsing.
 """
 
 import logging
@@ -48,22 +48,32 @@ class LangGraphClient:
                 if task.get("task_name") == "start_tutoring_session":
                     endpoint = "/start_session"
                     # For session start, use base request body (no student_input needed)
-                elif task.get("interaction_type") == "interruption":
+                elif task.get("interaction_type") == "interruption" or task.get("task_name") in ["handle_interruption", "student_mic_button_interrupt", "student_wants_to_interrupt"]:
                     endpoint = "/handle_interruption"
-                    # Handle different interruption types with appropriate student_input
-                    if task.get("interrupt_type") == "mic_button":
-                        # Mic button interruption - provide meaningful signal
-                        request_body["student_input"] = "[Student pressed mic button to interrupt]"
-                    else:
-                        # Voice interruption - use transcript or fallback
-                        request_body["student_input"] = task.get("transcript", "[Student interrupted]")
+                    # Interruption payload
+                    interrupt_text = task.get("transcript") or request_body.get("student_input") or "[Student interrupted]"
+                    request_body["student_input"] = interrupt_text
+                    # Pass through interrupted_plan_context if provided
+                    if task.get("interrupted_plan_context"):
+                        request_body["interrupted_plan_context"] = task.get("interrupted_plan_context")
+                    # Pass visual_context if present
+                    if task.get("visual_context"):
+                        request_body["visual_context"] = task.get("visual_context")
                 else:
                     endpoint = "/handle_response"
                     # Add student_input for regular response
                     request_body["student_input"] = task.get("transcript", "")
+                    # Pass visual_context if present
+                    if task.get("visual_context"):
+                        request_body["visual_context"] = task.get("visual_context")
                 
                 # --- ROBUSTNESS CHANGE: Construct URL safely ---
                 full_url = f"{self.base_url}{endpoint}"
+
+                # Ensure session_id is propagated to the Student Tutor service
+                # so that conversational context is maintained across turns.
+                if session_id:
+                    request_body["session_id"] = session_id
 
                 async with session.post(full_url, json=request_body) as response:
                     response.raise_for_status()
@@ -90,41 +100,3 @@ class LangGraphClient:
         except Exception as e:
             logger.error(f"Unexpected error invoking LangGraph task: {e}", exc_info=True)
             return None
-
-    async def _parse_sse_stream(self, response: aiohttp.ClientResponse) -> Optional[List[Dict[str, Any]]]:
-        """
-        Parse Server-Sent Events stream from LangGraph to extract the final toolbelt.
-        
-        Args:
-            response: The aiohttp response object
-            
-        Returns:
-            The final toolbelt as a list of action dictionaries
-        """
-        final_toolbelt = None
-        current_event = None
-        
-        # Read the response line by line
-        async for line_bytes in response.content.iter_any():
-            lines = line_bytes.decode('utf-8').split('\n')
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                if line.startswith("event: "):
-                    current_event = line[7:]  # Remove 'event: ' prefix
-                    logger.debug(f"SSE event: {current_event}")
-                elif line.startswith("data: "):
-                    data = line[6:]  # Remove 'data: ' prefix
-                    if data and data != '[DONE]' and current_event == 'final_toolbelt':
-                        try:
-                            final_toolbelt = json.loads(data)
-                            logger.info(f"Found final_toolbelt in SSE stream: {len(final_toolbelt)} actions")
-                            return final_toolbelt
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"Failed to parse SSE toolbelt data as JSON: {e}")
-                            continue
-        
-        return final_toolbelt if final_toolbelt else []

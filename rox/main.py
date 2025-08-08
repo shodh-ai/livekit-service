@@ -218,6 +218,11 @@ class RoxAgent(Agent):
         # Interruption handling
         self._interruption_pending: bool = False
         self._current_execution_cancelled: bool = False
+
+        # Plan pause/resume state
+        self._current_delivery_plan: Optional[List[Dict]] = None
+        self._current_plan_index: int = 0
+        self._is_paused: bool = False
         
         # Processing queue for tasks from the Brain
         self._processing_queue: asyncio.Queue = asyncio.Queue()
@@ -301,6 +306,17 @@ class RoxAgent(Agent):
                     logger.warning("No actions found in the delivery plan from the Brain.")
                 else:
                     await self._execute_toolbelt(actions)
+
+                # 4. Handle meta_action (e.g., RESUME) from Brain
+                meta_action = delivery_plan.get("meta_action") if isinstance(delivery_plan, dict) else None
+                if meta_action == "RESUME":
+                    logger.info("[META] Received RESUME. Unpausing and resuming previous plan if available.")
+                    self._is_paused = False
+                    # Continue from next action of the stored plan
+                    if self._current_delivery_plan is not None:
+                        start_idx = min(self._current_plan_index + 1, len(self._current_delivery_plan))
+                        if start_idx < len(self._current_delivery_plan):
+                            await self._execute_toolbelt(self._current_delivery_plan[start_idx:])
                 
                 # Mark task as done
                 self._processing_queue.task_done()
@@ -322,8 +338,16 @@ class RoxAgent(Agent):
         
         # Pre-process to combine consecutive speak actions for smoother TTS
         optimized_toolbelt = self._optimize_speech_actions(toolbelt)
-        
+        # Store current plan for potential pause/resume
+        self._current_delivery_plan = list(optimized_toolbelt)
+
         for i, action in enumerate(optimized_toolbelt):
+            # Update current index
+            self._current_plan_index = i
+            # Respect pause flag
+            if self._is_paused:
+                logger.info(f"Execution paused before action {i+1}/{len(optimized_toolbelt)}")
+                return
             # Check for interruption before each action
             if self._current_execution_cancelled:
                 logger.info(f"Execution cancelled due to interruption. Stopping at action {i+1}/{len(toolbelt)}")
@@ -730,7 +754,8 @@ class RoxAgent(Agent):
         """
         logger.info(f"[INTERRUPTION] Handling interruption: {task.get('task_name')}")
         
-        # 1. Stop current execution immediately
+        # 1. Pause current execution immediately
+        self._is_paused = True
         self._current_execution_cancelled = True
         
         # 2. Try to interrupt any ongoing TTS
@@ -750,9 +775,28 @@ class RoxAgent(Agent):
             except asyncio.QueueEmpty:
                 break
         
-        # 4. Immediately forward interruption to Brain with priority
+        # 4. Capture plan context (last and next actions) if available
+        last_action = None
+        next_action = None
+        try:
+            if self._current_delivery_plan is not None:
+                if 0 <= self._current_plan_index < len(self._current_delivery_plan):
+                    last_action = self._current_delivery_plan[self._current_plan_index]
+                if 0 <= (self._current_plan_index + 1) < len(self._current_delivery_plan):
+                    next_action = self._current_delivery_plan[self._current_plan_index + 1]
+        except Exception as e:
+            logger.warning(f"[INTERRUPTION] Could not capture plan context: {e}")
+
+        interrupted_plan_context = {"last_action": last_action, "next_action": next_action}
+
+        # 5. Immediately forward interruption to Brain with priority, including context
         logger.info(f"[INTERRUPTION] Forwarding to Brain: {task.get('task_name')}")
-        await self._processing_queue.put(task)
+        enriched_task = {
+            **task,
+            "interaction_type": "interruption",
+            "interrupted_plan_context": interrupted_plan_context,
+        }
+        await self._processing_queue.put(enriched_task)
 
     async def trigger_langgraph_task(self, task_name: str, json_payload: str, caller_identity: str):
         """Queue a task for processing by the Brain.

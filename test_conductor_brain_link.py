@@ -81,7 +81,7 @@ async def test_brain_standalone():
         
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "http://localhost:8080/invoke_task_streaming",
+                "http://localhost:8002/handle_response",
                 json=payload,
                 headers={"Content-Type": "application/json"}
             ) as response:
