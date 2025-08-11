@@ -1,0 +1,296 @@
+# livekit-service/rox/protos/interaction.proto
+syntax = "proto3";
+package rox.interaction; // Package name
+import "google/protobuf/empty.proto";
+import "google/protobuf/wrappers.proto";
+// For simple notifications if agent calls client and no specific response is needed.
+message Empty {}
+// Message sent from frontend when a button is clicked
+message FrontendButtonClickRequest {
+  string button_id = 1;    // Identifier for the button, e.g., "my_action_button"
+  string custom_data = 2;  // Optional: any string data you want to send
+}
+// Response from the agent for the button click
+message AgentResponse {
+  string status_message = 1; // e.g., "Button click processed"
+  string data_payload = 2;   // Optional: any data agent wants to return
+}
+// Message for dispatching UI actions to the frontend
+message UIAction {
+  enum ActionType {
+    UNSPECIFIED = 0;
+    ALERT = 1;
+    DISMISS_ALERT = 2;
+    // You can add other specific UI action types here later
+    // e.g., SHOW_MODAL = 3; UPDATE_ELEMENT = 4;
+  }
+  ActionType action_type = 1;
+  optional Alert alert = 2; // Payload for alert actions
+  // Add other optional fields for different action types, e.g.:
+  // optional Modal modal_payload = 3;
+  // optional ElementUpdate update_payload = 4;
+}
+message Alert {
+  string title = 1;
+  string message = 2;
+  repeated AlertButton buttons = 3;
+}
+message AlertButton {
+  string label = 1;
+  UIAction action = 2; // The action to perform when this button is clicked (e.g., DISMISS_ALERT)
+}
+// Message sent from frontend on page load to notify the agent
+message NotifyPageLoadRequest {
+  string task_stage = 1;     // e.g., "ROX_WELCOME_INIT"
+  string user_id = 2;        // User's identifier
+  string current_page = 3;   // e.g., "P1_RoxHome"
+  string session_id = 4;     // LiveKit Room SID or custom session ID
+  string chat_history = 5;   // Serialized chat history (e.g., JSON string)
+  optional string transcript = 6; // Optional: e.g., "client_loaded_rox_page"
+}
+// Message for generic RPC invocation data, if client constructs this based on proto
+message RpcInvocationData {
+  string caller_identity = 1; // Optional: if server needs to know caller from payload
+  string payload = 2;         // Base64 encoded actual protobuf message for the specific call
+  string request_id = 3;      // Optional: for tracking
+}
+// A generic request to invoke a task on the agent/LangGraph
+message InvokeAgentTaskRequest {
+  string task_name = 1; // e.g., "handle_user_chat", "get_progress_report", "start_modelling_activity"
+  string json_payload = 2; // A flexible JSON string for any additional data
+}
+message PushToTalkRequest {
+  
+}
+message UpdateAgentContextRequest {
+    string json_context_payload = 1; // A JSON string of the context to merge
+}
+// Service the agent will implement (called by frontend)
+service AgentInteraction {
+    rpc InvokeAgentTask(InvokeAgentTaskRequest) returns (stream AgentResponse);
+    rpc RequestInterrupt(google.protobuf.Empty) returns (AgentResponse);
+    rpc TestPing(google.protobuf.Empty) returns (AgentResponse);
+    rpc UpdateAgentContext(UpdateAgentContextRequest) returns (AgentResponse);
+    rpc HandleFrontendButton(RpcInvocationData) returns (google.protobuf.StringValue);
+    rpc NotifyPageLoad(NotifyPageLoadRequest) returns (AgentResponse);
+    rpc NotifyPageLoadV2(RpcInvocationData) returns (google.protobuf.StringValue);
+    rpc HandlePushToTalk(RpcInvocationData) returns (google.protobuf.StringValue);
+}
+// Message to represent a single text highlight range
+message HighlightRangeProto {
+  string id = 1;                 // Unique identifier for the highlight
+  int32 start = 2;               // Start position (ProseMirror index)
+  int32 end = 3;                 // End position (ProseMirror index)
+  string type = 4;               // Type of highlight (e.g., 'grammar', 'suggestion')
+  optional string message = 5;    // Optional message/comment
+  optional string wrong_version = 6; // Optional original text needing correction
+  optional string correct_version = 7;// Optional suggested correction
+}
+// Message to represent a single text strikethrough range
+message StrikeThroughRangeProto {
+  string id = 1;                 // Unique identifier for the strikethrough
+  int32 start = 2;               // Start position (ProseMirror index)
+  int32 end = 3;                 // End position (ProseMirror index)
+  string type = 4;               // Type of strikethrough (e.g., 'deletion', 'suggestion')
+  optional string message = 5;    // Optional message/comment
+}
+// Message to represent a single text edit suggestion
+message SuggestTextEditPayloadProto {
+  string suggestion_id = 1;     // Unique identifier for the suggestion
+  int32 start_pos = 2;          // Start position (ProseMirror index)
+  int32 end_pos = 3;            // End position (ProseMirror index)
+  string original_text = 4;     // The text to be replaced
+  string new_text = 5;          // The suggested new text
+}
+// Message for showing an inline, non-intrusive suggestion
+message ShowInlineSuggestionPayloadProto {
+  string suggestion_id = 1;     // Unique ID for this suggestion
+  int32 start_pos = 2;          // Start position in the editor (ProseMirror index)
+  int32 end_pos = 3;            // End position in the editor (ProseMirror index)
+  string suggestion_text = 4;   // Text to show on hover/click (e.g., "Consider rephrasing for clarity.")
+  string suggestion_type = 5;   // Type of suggestion (e.g., "grammar", "style", "clarity") - for potential styling/iconography
+}
+// Message for showing a tooltip or comment
+message ShowTooltipOrCommentPayloadProto {
+  string id = 1;                  // Unique ID for this tooltip/comment
+  int32 start_pos = 2;            // Start position in the editor (ProseMirror index)
+  int32 end_pos = 3;              // End position in the editor (ProseMirror index)
+  string text = 4;                // The content of the tooltip/comment
+  string tooltip_type = 5;        // E.g., "info", "suggestion", "error", "question" - for styling/iconography
+  // string anchor_element_id = 6; // Optional: If targeting a non-text element by ID, could be added back.
+}
+// Message for setting the entire content of a rich text editor
+message SetEditorContentPayloadProto {
+  oneof content_format {
+    string html_content = 1;  // Full HTML content
+    string json_content = 2;  // Tiptap JSON content as a string
+  }
+  // string target_editor_id = 3; // Optional: if multiple editors, specify which one. Consider if needed or if target_element_id is sufficient.
+}
+// Message for appending text to an editor in real-time
+message AppendTextToEditorRealtimePayloadProto {
+  string text_chunk = 1;        // The chunk of text to append
+  optional string stream_id = 2; // Optional: ID to group related chunks if part of a continuous stream
+  optional bool is_final_chunk = 3; // Indicates if this is the last chunk in a stream
+  // string target_editor_id = 4; // Optional: if multiple editors, specify which one. Consider if needed or if target_element_id is sufficient.
+}
+// Message for displaying visual aid commands on a canvas
+message DisplayVisualAidPayloadProto {
+  string commands_json = 1;     // JSON string containing visual aid commands
+  optional string canvas_id = 2; // Optional: ID of the canvas to target
+  optional bool clear_previous = 3; // Optional: Whether to clear previous visual aids
+}
+// Payload for executing a conversational sequence
+message ExecuteConversationalSequencePayloadProto {
+  string sequence_json = 1;     // JSON string containing the conversational sequence
+}
+// Payload for displaying a list of remarks
+message DisplayRemarksListPayloadProto {
+  repeated RemarkProto remarks = 1; // List of remarks to display
+}
+// Definition of a remark
+message RemarkProto {
+  string id = 1;          // Unique identifier for the remark
+  string title = 2;       // Title of the remark
+  string content = 3;     // Content of the remark
+  optional string type = 4; // Optional type of remark (e.g., "feedback", "suggestion")
+}
+// Payload for updating text content
+message UpdateTextContentPayloadProto {
+  string text = 1;        // The text content to update
+}
+// Payload for replacing a range of text
+message ReplaceTextRangePayloadProto {
+  int32 start = 1;        // Start index of the range
+  int32 end = 2;          // End index of the range
+  string replacement = 3; // The text to replace the range with
+}
+// Optional: Service the frontend could implement (called by agent for updates)
+// service ClientNotification {
+//   rpc NotifyClient(AgentUpdate) returns (Empty);
+// }
+// message AgentUpdate {
+//   string update_type = 1;
+//   string content = 2;
+// }
+// Enum to define what kind of UI action the agent wants the client to perform
+enum ClientUIActionType {
+  NO_ACTION = 0;
+  SHOW_ALERT = 1;
+  UPDATE_TEXT_CONTENT = 2;
+  TOGGLE_ELEMENT_VISIBILITY = 3;
+  START_TIMER = 4;
+  STOP_TIMER = 5;
+  PAUSE_TIMER = 6;
+  RESET_TIMER = 7;
+  UPDATE_PROGRESS_INDICATOR = 8;
+  UPDATE_SCORE_OR_PROGRESS = 9;
+  // UI Control & State Actions
+  SHOW_ELEMENT = 10;
+  HIDE_ELEMENT = 11;
+  // Navigation Actions
+  NAVIGATE_TO_PAGE = 12;
+  // Content Display Actions
+  UPDATE_LIVE_TRANSCRIPT = 13;
+  DISPLAY_TRANSCRIPT_OR_TEXT = 14;
+  DISPLAY_REMARKS_LIST = 15;
+  
+  // Button & Input Actions
+  SET_BUTTON_PROPERTIES = 21;
+  ENABLE_BUTTON = 22;
+  DISABLE_BUTTON = 23;
+  SHOW_BUTTON_OPTIONS = 24;
+  CLEAR_INPUT_FIELD = 25;
+  
+  // Editor & Content Actions
+  SET_EDITOR_READONLY_SECTIONS = 26;
+  
+  // Feedback & Loading Actions
+  SHOW_LOADING_INDICATOR = 27;
+  // Add more actions here as needed
+  HIGHLIGHT_TEXT_RANGES = 28; // Action to highlight text ranges
+  SUGGEST_TEXT_EDIT = 29;     // Action to suggest a text edit
+  SHOW_INLINE_SUGGESTION = 30; // Action to show a non-intrusive inline suggestion
+  SHOW_TOOLTIP_OR_COMMENT = 31;  // Action to display a tooltip or comment
+  SET_EDITOR_CONTENT = 32;       // Action to set the entire content of an editor
+  APPEND_TEXT_TO_EDITOR_REALTIME = 33; // Action to append text chunks to an editor
+  STRIKETHROUGH_TEXT_RANGES = 34;      // Action to strikethrough text ranges
+  // Conversational Actions
+  START_LISTENING = 35; // Action to make the client start listening for user input
+  STOP_LISTENING = 36;  // Action to make the client stop listening
+  EXECUTE_CONVERSATIONAL_SEQUENCE = 37; // Action to execute a conversational sequence
+  PROMPT_FOR_USER_INPUT = 38; // Action to prompt the user for input
+    // --- ADD THESE NEW ACTIONS ---
+  START_LISTENING_VISUAL = 39; // Use any unused numbers
+  STOP_LISTENING_VISUAL = 40;
+  SET_UI_STATE = 41;
+  // Add more actions here, e.g., CLICK_BUTTON, CHANGE_IMAGE_SRC
+  DISPLAY_VISUAL_AID = 42;            // Action to display visual aid commands on a canvas
+  FETCH_AND_DISPLAY_COURSE_MAP = 43;  // Action to fetch and display course map data
+  END_DOUBT_LISTENING_SESSION = 44;    // Action to end a doubt listening session
+  START_DOUBT_LISTENING_SESSION = 45;  // Action to start a doubt listening session
+  REPLACE_TEXT_RANGE = 46;             // Action to replace a range of text
+  SHOW_FEEDBACK = 47;
+  HIGHLIGHT_ELEMENT = 48;
+  
+  // NEW FRONTEND VOCABULARY ACTIONS (for advanced interactive capabilities)
+  GENERATE_VISUALIZATION = 49;          // Generate professional visualization on canvas
+  HIGHLIGHT_ELEMENTS = 50;              // Highlight multiple UI elements (plural)
+  GIVE_STUDENT_CONTROL = 51;            // Transfer control to student with message
+  TAKE_AI_CONTROL = 52;                 // AI regains control with message
+  CLEAR_ALL_ANNOTATIONS = 53;           // Clear all visual annotations and highlights
+  
+  // Jupyter Notebook Actions
+  JUPYTER_TYPE_IN_CELL = 54;           // Type code into a Jupyter notebook cell
+  JUPYTER_RUN_CELL = 55;                // Execute a Jupyter notebook cell
+  JUPYTER_CREATE_NEW_CELL = 56;         // Create a new Jupyter notebook cell
+  JUPYTER_SCROLL_TO_CELL = 57;         // Scroll to a specific cell in Jupyter notebook
+  JUPYTER_CLICK_PYODIDE = 58;           // Click on a Pyodide element in Jupyter notebook
+  
+  // Browser Navigation and Interaction Actions
+  BROWSER_NAVIGATE = 59;                // Navigate browser to a specific URL
+  BROWSER_CLICK = 60;                   // Click on a browser element
+  BROWSER_TYPE = 61;                    // Type text into a browser input field
+  UPLOAD_FILE_TO_JUPYTER = 62;          // Upload a file to Jupyter notebook environment
+  HIGHLIGHT_CELL_FOR_DOUBT_RESOLUTION = 63;
+  EXCALIDRAW_CLEAR_CANVAS = 64;         // Clear all elements from Excalidraw canvas
+  EXCALIDRAW_UPDATE_ELEMENTS = 65;      // Update existing elements on canvas
+  EXCALIDRAW_REMOVE_HIGHLIGHTING = 66;  // Remove all highlighting from canvas
+  EXCALIDRAW_HIGHLIGHT_ELEMENTS_ADVANCED = 67; // Advanced highlighting with custom options
+  EXCALIDRAW_MODIFY_ELEMENTS = 68;      // Modify existing canvas elements
+  EXCALIDRAW_CAPTURE_SCREENSHOT = 69;   // Capture canvas screenshot
+  EXCALIDRAW_GET_CANVAS_ELEMENTS = 70;  // Get current canvas elements
+  EXCALIDRAW_SET_GENERATING = 71;       // Set generating state for UI
+}
+// Request from Agent to Client to perform a UI action
+message AgentToClientUIActionRequest {
+  string request_id = 1; // Optional: for tracking/correlation
+  ClientUIActionType action_type = 2;
+  string target_element_id = 3;   // Optional: ID of the HTML element to target
+  map<string, string> parameters = 4; // Flexible parameters, e.g.,
+  repeated HighlightRangeProto highlight_ranges_payload = 5; // Payload for HIGHLIGHT_TEXT_RANGES
+  optional SuggestTextEditPayloadProto suggest_text_edit_payload = 6; // Payload for SUGGEST_TEXT_EDIT
+  optional ShowInlineSuggestionPayloadProto show_inline_suggestion_payload = 7; // Payload for SHOW_INLINE_SUGGESTION
+  optional ShowTooltipOrCommentPayloadProto show_tooltip_or_comment_payload = 8; // Payload for SHOW_TOOLTIP_OR_COMMENT
+  optional SetEditorContentPayloadProto set_editor_content_payload = 9;       // Payload for SET_EDITOR_CONTENT
+  optional AppendTextToEditorRealtimePayloadProto append_text_to_editor_realtime_payload = 10; // Payload for APPEND_TEXT_TO_EDITOR_REALTIME
+  repeated StrikeThroughRangeProto strikethrough_ranges_payload = 11; // Payload for STRIKETHROUGH_TEXT_RANGES
+   optional DisplayVisualAidPayloadProto display_visual_aid_payload = 12; // Payload for DISPLAY_VISUAL_AID
+  optional ExecuteConversationalSequencePayloadProto execute_conversational_sequence_payload = 13; // Payload for EXECUTE_CONVERSATIONAL_SEQUENCE
+  optional DisplayRemarksListPayloadProto display_remarks_list_payload = 14; // Payload for DISPLAY_REMARKS_LIST
+  optional UpdateTextContentPayloadProto update_text_content_payload = 15; // Payload for UPDATE_TEXT_CONTENT
+  optional ReplaceTextRangePayloadProto replace_text_range_payload = 16; // Payload for REPLACE_TEXT_RANGE
+                                      // For SHOW_ALERT: {"message": "Hello!", "type": "info/error/warning"}
+                                      // For UPDATE_TEXT_CONTENT: {"text": "New content"}
+                                      // For TOGGLE_ELEMENT_VISIBILITY: {"visible": "true/false"} (or just toggle)
+}
+// Response from Client to Agent after attempting the UI action
+message ClientUIActionResponse {
+  string request_id = 1; // Corresponds to AgentToClientUIActionRequest.request_id
+  bool success = 2;
+  string message = 3;    // e.g., "Alert shown", "Element #myText updated", "Error: Element #xyz not found"
+}
+// Service the CLIENT will implement, and the AGENT will call
+service ClientSideUI {
+  rpc PerformUIAction(AgentToClientUIActionRequest) returns (ClientUIActionResponse);
+}
