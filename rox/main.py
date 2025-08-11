@@ -223,6 +223,12 @@ class RoxAgent(Agent):
         # Plan pause/resume state
         self._current_delivery_plan: Optional[List[Dict]] = None
         self._current_plan_index: int = 0
+        
+        # Interruption context storage for resumption
+        self._interrupted_plan: Optional[List[Dict]] = None
+        self._interrupted_plan_index: int = 0
+        self._interrupted_plan_context: Optional[Dict] = None
+        self._interruption_timestamp: Optional[float] = None
         self._is_paused: bool = False
         
         # Processing queue for tasks from the Brain
@@ -319,19 +325,21 @@ class RoxAgent(Agent):
                 else:
                     await self._execute_toolbelt(actions)
 
-                # --- REFACTORED LOGIC ---
-                # After an interruption, the brain's response IS the plan. We just run it.
-                # The 'RESUME' meta_action tells us that the OLD plan is still valid.
+                # --- ENHANCED RESUMPTION LOGIC ---
+                # Handle different meta actions from the Brain after interruption
                 meta_action = delivery_plan.get("meta_action") if isinstance(delivery_plan, dict) else None
 
                 if task.get("interaction_type") == "interruption":
-                    # Pause flag was already reset before execution - just handle meta actions
-                    if meta_action != "DISCARD":
-                        logger.info("[META] Interruption handled. Original plan is kept for potential future resumption.")
-                    else:
+                    # Pause flag was already reset before execution - handle meta actions
+                    if meta_action == "RESUME":
+                        logger.info("[META] Brain requested RESUME - continuing from interruption point")
+                        await self._resume_interrupted_plan()
+                    elif meta_action == "DISCARD":
                         logger.info("[META] Brain instructed to discard original plan.")
-                        self._current_delivery_plan = None  # Discard the old plan
-                # --- END REFACTORED LOGIC ---
+                        self._clear_interrupted_plan_context()
+                    else:
+                        logger.info("[META] Interruption handled. Original plan context preserved for potential resumption.")
+                # --- END ENHANCED RESUMPTION LOGIC ---
                 
                 # Mark task as done
                 self._processing_queue.task_done()
@@ -407,7 +415,8 @@ class RoxAgent(Agent):
                             logger.info(f"TTS started successfully: {cleaned_text[:50]}...")
                             
                             # 2. Wait for this specific playback to complete with shorter timeout
-                            await asyncio.wait_for(playback_handle.done(), timeout=20.0)
+                            # Use the correct LiveKit API - await the handle directly
+                            await asyncio.wait_for(playback_handle, timeout=20.0)
                             logger.info("TTS completed successfully.")
                             
                             # Add small delay after completion to prevent audio artifacts
@@ -415,10 +424,10 @@ class RoxAgent(Agent):
                             
                         except asyncio.TimeoutError:
                             logger.error(f"TTS timeout after 20s for text: {cleaned_text[:50]}...")
-                            # Try to cancel the playback handle to prevent artifacts
+                            # Try to interrupt the playback handle to prevent artifacts
                             try:
                                 if 'playback_handle' in locals():
-                                    playback_handle.cancel()
+                                    playback_handle.interrupt()
                             except:
                                 pass
                         except Exception as tts_error:
@@ -828,19 +837,44 @@ class RoxAgent(Agent):
             except asyncio.QueueEmpty:
                 break
         
-        # 4. Capture plan context (last and next actions) if available
+        # 4. Capture and store complete plan context for resumption
+        import time
         last_action = None
         next_action = None
+        remaining_actions = []
+        
         try:
             if self._current_delivery_plan is not None:
+                # Store the complete interrupted plan state
+                self._interrupted_plan = self._current_delivery_plan.copy()
+                self._interrupted_plan_index = self._current_plan_index
+                self._interruption_timestamp = time.time()
+                
+                # Capture current and next actions
                 if 0 <= self._current_plan_index < len(self._current_delivery_plan):
                     last_action = self._current_delivery_plan[self._current_plan_index]
                 if 0 <= (self._current_plan_index + 1) < len(self._current_delivery_plan):
                     next_action = self._current_delivery_plan[self._current_plan_index + 1]
+                
+                # Capture all remaining actions for potential resumption
+                if self._current_plan_index < len(self._current_delivery_plan):
+                    remaining_actions = self._current_delivery_plan[self._current_plan_index:]
+                
+                logger.info(f"[INTERRUPTION] Stored plan context: index={self._current_plan_index}, remaining_actions={len(remaining_actions)}")
         except Exception as e:
             logger.warning(f"[INTERRUPTION] Could not capture plan context: {e}")
 
-        interrupted_plan_context = {"last_action": last_action, "next_action": next_action}
+        interrupted_plan_context = {
+            "last_action": last_action, 
+            "next_action": next_action,
+            "remaining_actions": remaining_actions,
+            "interrupted_at_index": self._current_plan_index,
+            "total_plan_length": len(self._current_delivery_plan) if self._current_delivery_plan else 0,
+            "interruption_timestamp": self._interruption_timestamp
+        }
+        
+        # Store context for potential resumption
+        self._interrupted_plan_context = interrupted_plan_context
 
         # 5. Immediately forward interruption to Brain with priority, including context
         logger.info(f"[INTERRUPTION] Forwarding to Brain: {task.get('task_name')}")
@@ -926,6 +960,53 @@ class RoxAgent(Agent):
             logger.info("[MANUAL_STOP] Queued transcript for Brain processing")
         else:
             logger.info("[MANUAL_STOP] No transcript to process - mic turned off without speech")
+
+    async def _resume_interrupted_plan(self):
+        """Resume execution from the interruption point.
+        
+        This method continues the original plan from where it was interrupted,
+        allowing for seamless continuation after handling a doubt or question.
+        """
+        if not self._interrupted_plan or self._interrupted_plan_context is None:
+            logger.warning("[RESUME] No interrupted plan context available for resumption")
+            return
+        
+        logger.info(f"[RESUME] Resuming interrupted plan from index {self._interrupted_plan_index}")
+        logger.info(f"[RESUME] Original plan had {len(self._interrupted_plan)} actions, {len(self._interrupted_plan) - self._interrupted_plan_index} remaining")
+        
+        # Calculate remaining actions from interruption point
+        remaining_actions = self._interrupted_plan[self._interrupted_plan_index:]
+        
+        if remaining_actions:
+            # Restore the plan state and continue execution
+            self._current_delivery_plan = remaining_actions
+            self._current_plan_index = 0  # Start from beginning of remaining actions
+            
+            logger.info(f"[RESUME] Executing {len(remaining_actions)} remaining actions")
+            await self._execute_toolbelt(remaining_actions)
+            
+            # Clear the interrupted plan context after successful resumption
+            self._clear_interrupted_plan_context()
+            logger.info("[RESUME] Successfully resumed and completed interrupted plan")
+        else:
+            logger.info("[RESUME] No remaining actions to execute - plan was already complete")
+            self._clear_interrupted_plan_context()
+
+    def _clear_interrupted_plan_context(self):
+        """Clear stored interruption context when no longer needed."""
+        self._interrupted_plan = None
+        self._interrupted_plan_index = 0
+        self._interrupted_plan_context = None
+        self._interruption_timestamp = None
+        logger.info("[RESUME] Cleared interrupted plan context")
+
+    def get_interruption_context(self) -> Optional[Dict]:
+        """Get the current interruption context for external access.
+        
+        Returns:
+            Dictionary containing interruption context or None if no interruption stored
+        """
+        return self._interrupted_plan_context
 
 
 async def entrypoint(ctx: JobContext):

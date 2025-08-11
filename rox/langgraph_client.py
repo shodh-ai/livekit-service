@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class LangGraphClient:
     def __init__(self):
         # The URL should point to your new Student Tutor agent's base
-        self.base_url = os.getenv("LANGGRAPH_TUTOR_URL", "http://localhost:8002")
+        self.base_url = os.getenv("LANGGRAPH_TUTOR_URL", "http://localhost:8003")
         self.timeout = aiohttp.ClientTimeout(total=120.0)
 
     # --- SIGNATURE CHANGE ---
