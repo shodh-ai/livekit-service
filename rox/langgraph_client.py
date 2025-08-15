@@ -16,18 +16,18 @@ logger = logging.getLogger(__name__)
 class LangGraphClient:
     def __init__(self):
         # The URL should point to your new Student Tutor agent's base
-        self.base_url = os.getenv("LANGGRAPH_TUTOR_URL", "http://localhost:8003")
+        self.base_url = os.getenv("LANGGRAPH_TUTOR_URL", "http://localhost:8001")
         self.timeout = aiohttp.ClientTimeout(total=120.0)
 
     # --- SIGNATURE CHANGE ---
-    async def invoke_langgraph_task(self, task: Dict, user_id: str, expert_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+    async def invoke_langgraph_task(self, task: Dict, user_id: str, curriculum_id: str, session_id: str) -> Optional[Dict[str, Any]]:
         """
         Invoke a task with LangGraph and return the delivery plan.
         
         Args:
             task: The task dictionary containing task_name and other parameters
             user_id: The student identifier
-            expert_id: The expert identifier for the current course
+            curriculum_id: The curriculum identifier for the current course
             session_id: The session identifier
             
         Returns:
@@ -38,7 +38,7 @@ class LangGraphClient:
         # Base request body for all endpoints
         request_body = {
             "student_id": user_id,
-            "expert_id": expert_id,
+            "curriculum_id": curriculum_id,
             "current_lo_id": task.get("current_lo_id", None)
         }
 

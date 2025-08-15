@@ -210,7 +210,7 @@ class RoxAgent(Agent):
         self.user_id: Optional[str] = None
         self.session_id: Optional[str] = None
         self.caller_identity: Optional[str] = None  # The participant ID of the frontend
-        self.expert_id: str = "ai_business_expert_424d7f"  # Default expert, can be set dynamically
+        self.curriculum_id: str = "ai_business_expert_424d7f"  # Default curriculum, can be set dynamically
         self.current_lo_id: Optional[str] = None  # Current learning objective ID
         
         # State of Expectation - determines how to interpret student input
@@ -257,7 +257,7 @@ class RoxAgent(Agent):
         
         This loop continuously processes tasks from the queue:
         1. Receives task from RPC handlers or TranscriptInterceptor
-        2. Adds session context (user_id, expert_id, lo_id) to the task
+        2. Adds session context (user_id, curriculum_id, lo_id) to the task
         3. Sends task to Brain (LangGraph) for processing
         4. Parses the returned state to update its own session context (the new lo_id)
         5. Executes the returned action script (the delivery_plan)
@@ -288,29 +288,24 @@ class RoxAgent(Agent):
                 logger.info(f"Forwarding task to LangGraph: {task.get('task_name')}")
                 
                 # --- Call the updated client signature ---
-                final_state = await self._langgraph_client.invoke_langgraph_task(
-                    task=task,
-                    user_id=self.user_id or "anonymous_student",
-                    expert_id=self.expert_id or "default_expert",
-                    session_id=self.session_id or "default_session"
-                )
+                response = await self._langgraph_client.invoke_langgraph_task(task, self.user_id, self.curriculum_id, self.session_id)
                 
-                if not final_state:
+                if not response:
                     logger.error("Received empty response from Brain. Skipping turn.")
                     self._processing_queue.task_done()
                     continue
 
                 # --- Parse the full state dictionary, not just a toolbelt ---
-                logger.info(f"RECEIVED FINAL STATE FROM BRAIN: {json.dumps(final_state, indent=2)}")
+                logger.info(f"RECEIVED FINAL STATE FROM BRAIN: {json.dumps(response, indent=2)}")
 
                 # 2. Update the Conductor's own state from the Brain's response
-                new_lo_id = final_state.get("current_lo_id")
+                new_lo_id = response.get("current_lo_id")
                 if new_lo_id and new_lo_id != self.current_lo_id:
                     self.current_lo_id = new_lo_id
                     logger.info(f"SESSION CONTEXT UPDATED. New current_lo_id is: {self.current_lo_id}")
 
                 # 3. Extract the action script (delivery_plan) and execute it
-                delivery_plan = final_state.get("delivery_plan", {})
+                delivery_plan = response.get("delivery_plan", {})
                 actions = delivery_plan.get("actions", [])
                 
                 # Reset cancellation flag AND pause flag before executing interruption response
@@ -1039,16 +1034,24 @@ async def entrypoint(ctx: JobContext):
         metadata_str = local_participant.metadata
         metadata = json.loads(metadata_str) if metadata_str else {}
         
-        # Populate the agent's session state from token metadata
-        rox_agent_instance.user_id = metadata.get("student_id") or metadata.get("user_id") or "skill_test_student_671"
-        if metadata.get("expert_id"):
-            rox_agent_instance.expert_id = metadata.get("expert_id")
-        else:
-            # Fallback to test expert ID for local testing
-            rox_agent_instance.expert_id = "ai_business_expert_424d7f"
-        rox_agent_instance.current_lo_id = metadata.get("initial_lo_id")  # Good practice to have an initial topic
+        # *** THE KEY CHANGE: Read the curriculum_id from environment metadata ***
+        # The metadata is now passed from the worker environment
+        metadata_str = os.getenv("STUDENT_TOKEN_METADATA", "{}")
+        metadata = json.loads(metadata_str) if metadata_str else {}
         
-        logger.info(f"Agent state populated from metadata: user_id={rox_agent_instance.user_id}, expert_id={rox_agent_instance.expert_id}, current_lo_id={rox_agent_instance.current_lo_id}")
+        rox_agent_instance.user_id = metadata.get("user_id")
+        
+        # *** THE KEY CHANGE: Read the curriculum_id ***
+        rox_agent_instance.curriculum_id = metadata.get("curriculum_id") # Using 'curriculum_id' variable name
+        
+        # Validate that we have the necessary IDs
+        if not rox_agent_instance.user_id or not rox_agent_instance.curriculum_id:
+            logger.error(f"CRITICAL: Missing user_id or curriculum_id in metadata. Agent cannot function.")
+            return
+
+        rox_agent_instance.current_lo_id = metadata.get("current_lo_id")
+        
+        logger.info(f"Agent state populated: user_id={rox_agent_instance.user_id}, curriculum_id={rox_agent_instance.curriculum_id}")
     except Exception as e:
         logger.warning(f"Could not parse token metadata, using defaults: {e}")
     
