@@ -218,6 +218,9 @@ class RoxAgent(Agent):
         
         # Interruption handling
         self._interruption_pending: bool = False
+        
+        # Session start deduplication
+        self._session_started: bool = False
         self._current_execution_cancelled: bool = False
 
         # Plan pause/resume state
@@ -1027,6 +1030,8 @@ async def entrypoint(ctx: JobContext):
     rox_agent_instance = RoxAgent()
     ctx.rox_agent = rox_agent_instance  # Make agent findable by RPC service
     rox_agent_instance._room = ctx.room
+    # Set session_id to the room name for LangGraph communication
+    rox_agent_instance.session_id = ctx.room.name
     
     # --- NEW: Read metadata from the token and populate agent state ---
     try:
@@ -1069,7 +1074,7 @@ async def entrypoint(ctx: JobContext):
         ),
         llm=rox_agent_instance.llm_interceptor,
         tts=deepgram.TTS(
-            model="aura-asteria-en", 
+            model="aura-2-helena-en", 
             api_key=os.environ.get("DEEPGRAM_API_KEY"),
             # Only use supported parameters for connection stability
             encoding="linear16",
@@ -1233,13 +1238,17 @@ async def entrypoint(ctx: JobContext):
             
             # Create a special, predefined task.
             # CRITICAL: It has NO 'transcript' because the student hasn't spoken.
-            initial_task = {
-                "task_name": "start_tutoring_session",
-                "caller_identity": rox_agent_instance.caller_identity
-            }
-            
-            # Queue this initial task. The processing_loop will pick it up.
-            await rox_agent_instance._processing_queue.put(initial_task)
+            # Only start session if not already started (prevent duplicates)
+            if not rox_agent_instance._session_started:
+                initial_task = {
+                    "task_name": "start_tutoring_session",
+                    "caller_identity": rox_agent_instance.caller_identity
+                }
+                
+                # Queue this initial task. The processing_loop will pick it up.
+                await rox_agent_instance._processing_queue.put(initial_task)
+                rox_agent_instance._session_started = True
+                logger.info("Student joined: Queued initial session start task")
             
         else:
             logger.warning("No student in the room. Agent will wait for a participant to join.")

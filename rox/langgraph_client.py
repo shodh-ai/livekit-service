@@ -37,6 +37,7 @@ class LangGraphClient:
         
         # Base request body for all endpoints
         request_body = {
+            "session_id": session_id,
             "student_id": user_id,
             "curriculum_id": curriculum_id,
             "current_lo_id": task.get("current_lo_id", None)
@@ -48,6 +49,7 @@ class LangGraphClient:
                 if task.get("task_name") == "start_tutoring_session":
                     endpoint = "/start_session"
                     # For session start, use base request body (no student_input needed)
+                    logger.info(f"DEBUG: start_session payload: {request_body}")
                 elif task.get("interaction_type") == "interruption" or task.get("task_name") in ["handle_interruption", "student_mic_button_interrupt", "student_wants_to_interrupt"]:
                     endpoint = "/handle_interruption"
                     # Interruption payload
