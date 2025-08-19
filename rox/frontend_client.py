@@ -117,7 +117,9 @@ class FrontendClient:
             "modify_elements": "EXCALIDRAW_MODIFY_ELEMENTS",
             "capture_screenshot": "EXCALIDRAW_CAPTURE_SCREENSHOT",
             "get_canvas_elements": "EXCALIDRAW_GET_CANVAS_ELEMENTS",
-            "set_generating": "EXCALIDRAW_SET_GENERATING"
+            "set_generating": "EXCALIDRAW_SET_GENERATING",
+            # Alias: allow backend to request generation from text without changing protos
+            "GENERATE_VISUALIZATION_FROM_TEXT": "GENERATE_VISUALIZATION"
         }
         
         action_type = action_type_map.get(tool_name, tool_name.upper())

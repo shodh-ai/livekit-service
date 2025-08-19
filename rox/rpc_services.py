@@ -184,15 +184,18 @@ class AgentInteractionService:
         logger.info("[RPC] Received TestPing")
         
         try:
-            # Queue session start task to trigger curriculum navigation
-            if self.agent:
+            # Queue session start task to trigger curriculum navigation (prevent duplicates)
+            if self.agent and not self.agent._session_started:
                 session_start_task = {
                     "task_name": "start_tutoring_session",
                     "caller_identity": raw_payload.caller_identity,
                 }
                 await self.agent._processing_queue.put(session_start_task)
+                self.agent._session_started = True
                 logger.info("[TestPing] Queued session start task to trigger curriculum navigation")
-            
+            elif self.agent and self.agent._session_started:
+                logger.info("[TestPing] Session already started, skipping duplicate start")
+
             response = interaction_pb2.AgentResponse(
                 status_message="Pong! Conductor is alive and responding. Test task queued for LangGraph."
             )

@@ -219,6 +219,7 @@ class RoxAgent(Agent):
         # Interruption handling
         self._interruption_pending: bool = False
         self._current_execution_cancelled: bool = False
+        self._session_started: bool = False
 
         # Plan pause/resume state
         self._current_delivery_plan: Optional[List[Dict]] = None
@@ -504,25 +505,33 @@ class RoxAgent(Agent):
                         logger.warning("Frontend client not available - would clear all annotations")
                 
                 # --- NEW FRONTEND VOCABULARY TOOLS ---
-                elif tool_name == 'generate_visualization':
-                    # Generate professional visualization on canvas -> DISPLAY_VISUAL_AID
+                elif tool_name == 'display_visual_aid':
+                    # Pass-through: forward visualization request to frontend which will call Visualizer service
                     if self._frontend_client:
-                        # Support both new structured format (elements) and legacy format (prompt)
-                        elements = parameters.get('elements')
-                        prompt = parameters.get('prompt')
-                        
-                        await self._frontend_client.generate_visualization(
-                            self._room, self.caller_identity, 
-                            elements=elements,
-                            prompt=prompt
-                        )
-                        
-                        if elements:
-                            logger.info(f"Generated visualization with {len(elements)} structured elements")
-                        else:
-                            logger.info(f"Generated visualization: {prompt}")
+                        try:
+                            # Expect parameters like { "topic_context": str, "text_to_visualize": str }
+                            topic_context = parameters.get('topic_context', '')
+                            text_to_visualize = parameters.get('text_to_visualize') or parameters.get('prompt') or ''
+
+                            if not text_to_visualize:
+                                logger.warning("[display_visual_aid] Missing text_to_visualize; skipping frontend request")
+                            else:
+                                # Use existing GENERATE_VISUALIZATION action with a prompt.
+                                # Frontend will detect 'prompt' and call the Visualizer service.
+                                await self._frontend_client.execute_visual_action(
+                                    self._room,
+                                    self.caller_identity,
+                                    'GENERATE_VISUALIZATION',
+                                    {
+                                        'prompt': text_to_visualize,
+                                        'topic_context': topic_context
+                                    }
+                                )
+                                logger.info("[display_visual_aid] Forwarded prompt to frontend for visualization")
+                        except Exception as e:
+                            logger.error(f"[display_visual_aid] Failed to forward to frontend: {e}", exc_info=True)
                     else:
-                        logger.warning(f"Frontend client not available - would generate visualization: {parameters}")
+                        logger.warning(f"Frontend client not available - would forward display_visual_aid: {parameters}")
                 
                 elif tool_name == 'highlight_elements':
                     # Highlight specific UI elements -> HIGHLIGHT_TEXT_RANGES
@@ -573,6 +582,8 @@ class RoxAgent(Agent):
                         logger.warning(f"Frontend client not available - would show feedback: {parameters.get('message', '')}")
                 
                 elif tool_name == "listen":
+                    logger.info("Preparing to listen, adding a pre-listen delay...")
+                    await asyncio.sleep(0.2) # 200ms pre-listen buffer
                     # Set expectation state to wait for interruptions
                     self._expected_user_input_type = "INTERRUPTION"
                     logger.info("State of Expectation set to: INTERRUPTION")
@@ -926,6 +937,37 @@ class RoxAgent(Agent):
         else:
             logger.warning("[VAD_MIC_OFF] Frontend client or caller_identity not available for mic disable")
 
+    async def _process_user_speech_auto(self, transcript: str):
+        """Process user speech automatically detected by VAD.
+        
+        Args:
+            transcript: The speech transcript to process
+        """
+        logger.info(f"[VAD_AUTO] Processing auto-detected speech: {transcript}")
+        
+        # Disable mic via frontend RPC (idempotent / safe if already off)
+        if self._frontend_client and self.caller_identity:
+            try:
+                await self._frontend_client.set_mic_enabled(
+                    self._room,
+                    self.caller_identity,
+                    False,
+                    message="Processing your input..."
+                )
+                logger.info("[VAD_AUTO] Disabled microphone via frontend RPC")
+            except Exception as e:
+                logger.warning(f"[VAD_AUTO] Failed to disable microphone via RPC: {e}")
+        
+        # Queue the transcript for LangGraph processing
+        task = {
+            "task_name": "handle_response",
+            "caller_identity": self.caller_identity,
+            "transcript": transcript,
+            "interaction_type": "vad_auto_speech"
+        }
+        await self._processing_queue.put(task)
+        logger.info("[VAD_AUTO] Queued speech transcript for Brain processing")
+
     async def _process_manual_stop_listening(self, task: Dict[str, Any]):
         """Process manual mic turn-off by user.
         
@@ -1027,7 +1069,8 @@ async def entrypoint(ctx: JobContext):
     rox_agent_instance = RoxAgent()
     ctx.rox_agent = rox_agent_instance  # Make agent findable by RPC service
     rox_agent_instance._room = ctx.room
-    
+    rox_agent_instance.session_id = ctx.room.name
+
     # --- NEW: Read metadata from the token and populate agent state ---
     try:
         local_participant = ctx.room.local_participant
@@ -1069,7 +1112,7 @@ async def entrypoint(ctx: JobContext):
         ),
         llm=rox_agent_instance.llm_interceptor,
         tts=deepgram.TTS(
-            model="aura-asteria-en", 
+            model="aura-2-helena-en", 
             api_key=os.environ.get("DEEPGRAM_API_KEY"),
             # Only use supported parameters for connection stability
             encoding="linear16",
@@ -1116,34 +1159,7 @@ async def entrypoint(ctx: JobContext):
     # Register the VAD handler AFTER rox_agent_instance is created
     main_agent_session.on("user_state_changed", _handle_user_state_change)
     
-    async def _process_user_speech_auto(self, transcript: str):
-        """Process user speech automatically detected by VAD.
-        
-        Args:
-            transcript: The speech transcript to process
-        """
-        logger.info(f"[VAD_AUTO] Processing auto-detected speech: {transcript}")
-        
-        # Disable mic via frontend RPC
-        if self._frontend_client and self.caller_identity:
-            await self._frontend_client.set_mic_enabled(
-                room=self._room,
-                caller_identity=self.caller_identity,
-                enabled=False,
-                action_type="STOP_LISTENING_VISUAL",
-                message="Processing your input..."
-            )
-            logger.info("[VAD_AUTO] Disabled microphone via frontend RPC")
-        
-        # Queue the transcript for LangGraph processing
-        task = {
-            "task_name": "handle_response",
-            "caller_identity": self.caller_identity,
-            "transcript": transcript,
-            "interaction_type": "vad_auto_speech"
-        }
-        await self._processing_queue.put(task)
-        logger.info("[VAD_AUTO] Queued speech transcript for Brain processing")
+    
     
     # --- Register RPC Handlers (The Conductor's "Ears") ---
     agent_rpc_service = AgentInteractionService(ctx=ctx)
@@ -1233,13 +1249,18 @@ async def entrypoint(ctx: JobContext):
             
             # Create a special, predefined task.
             # CRITICAL: It has NO 'transcript' because the student hasn't spoken.
-            initial_task = {
-                "task_name": "start_tutoring_session",
-                "caller_identity": rox_agent_instance.caller_identity
-            }
+            # Only start session if not already started (prevent duplicates)
+            if not rox_agent_instance._session_started:
+                initial_task = {
+                    "task_name": "start_tutoring_session",
+                    "caller_identity": rox_agent_instance.caller_identity
+                }
+                
+                # Queue this initial task. The processing_loop will pick it up.
+                await rox_agent_instance._processing_queue.put(initial_task)
+                rox_agent_instance._session_started = True
+                logger.info("Student joined: Queued initial session start task")
             
-            # Queue this initial task. The processing_loop will pick it up.
-            await rox_agent_instance._processing_queue.put(initial_task)
             
         else:
             logger.warning("No student in the room. Agent will wait for a participant to join.")

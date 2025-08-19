@@ -37,6 +37,7 @@ class LangGraphClient:
         
         # Base request body for all endpoints
         request_body = {
+            "session_id": session_id,
             "student_id": user_id,
             "curriculum_id": curriculum_id,
             "current_lo_id": task.get("current_lo_id", None)
