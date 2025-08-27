@@ -1,4 +1,4 @@
-# livekit-service/rox/protos/interaction.proto
+// livekit-service/rox/protos/interaction.proto
 syntax = "proto3";
 package rox.interaction; // Package name
 import "google/protobuf/empty.proto";

@@ -1,27 +1,22 @@
 # livekit-service/Dockerfile
 # Use Python 3.11 slim image
-FROM python:3.11-slim
+# ---- Build Stage ----
+FROM python:3.11-slim AS builder
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies for audio/video processing and build tools
+# Install build-time system dependencies only
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
     build-essential \
     gcc \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first to leverage Docker cache
+# Copy requirements and install Python deps with build tools
 COPY requirements.txt .
-
-# Install Python dependencies (with caching for faster builds)
-# Install build dependencies like Cython and wheel first
-RUN pip install Cython wheel
-
-# Install Python dependencies (with caching for faster builds)
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir Cython wheel \
+ && pip install --no-cache-dir -r requirements.txt
 
 # Copy the application code
 COPY . .
@@ -37,6 +32,28 @@ RUN python -m grpc_tools.protoc \
 
 # Download the required models for the livekit agents
 RUN python rox/main.py download-files
+
+# ---- Final Stage ----
+FROM python:3.11-slim
+
+# Create a non-root user and group
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Set working directory
+WORKDIR /app
+
+# Install runtime-only dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed packages and application from the builder stage
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /app /app
+
+# Set ownership and drop privileges
+RUN chown -R appuser:appuser /app
+USER appuser
 
 # Set working directory to rox for the unified service
 WORKDIR /app/rox
