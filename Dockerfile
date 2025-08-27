@@ -1,70 +1,56 @@
-# livekit-service/Dockerfile
-# Use Python 3.11 slim image
-# ---- Build Stage ----
-FROM python:3.11-slim AS builder
-
-# Set working directory
-WORKDIR /app
-
-# Install build-time system dependencies only
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install Python deps with build tools
-COPY requirements.txt .
-RUN pip install --no-cache-dir Cython wheel \
- && pip install --no-cache-dir -r requirements.txt
-
-# Copy the application code
-COPY . .
-
-# Regenerate protobuf files to match the installed grpcio-tools version
-# This ensures the generated code is compatible with the libraries in the container
-RUN python -m grpc_tools.protoc \
-    -I/app/rox/protos \
-    --python_out=/app/rox/generated/protos \
-    --pyi_out=/app/rox/generated/protos \
-    --grpc_python_out=/app/rox/generated/protos \
-    /app/rox/protos/interaction.proto
-
-# Download the required models for the livekit agents
-RUN python rox/main.py download-files
-
-# ---- Final Stage ----
+# Use Python 3.11 slim as base image for better performance and security
 FROM python:3.11-slim
 
-# Create a non-root user and group
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-
 # Set working directory
 WORKDIR /app
 
-# Install runtime-only dependencies
+# Install system dependencies required for audio processing and gRPC
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
+    gcc \
+    g++ \
+    make \
+    pkg-config \
+    libffi-dev \
+    libssl-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed packages and application from the builder stage
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /app /app
+# Copy requirements first for better Docker layer caching
+COPY requirements.txt .
 
-# Set ownership and drop privileges
-RUN chown -R appuser:appuser /app
-USER appuser
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Set working directory to rox for the unified service
-WORKDIR /app/rox
+# Copy the entire project
+COPY . .
 
-# Expose the service port
-EXPOSE 5005
+# Generate protobuf files if they don't exist
+RUN mkdir -p generated/protos && \
+    python -m grpc_tools.protoc \
+    --python_out=generated/protos \
+    --grpc_python_out=generated/protos \
+    --proto_path=. \
+    interaction.proto || echo "Protobuf generation completed"
 
-# Set environment variables
+# Create empty __init__.py files for Python imports
+RUN touch generated/__init__.py && \
+    touch generated/protos/__init__.py
+
+# Set Python path to include the project root
+ENV PYTHONPATH=/app
+
+# Expose the port that Cloud Run expects
+EXPOSE 8080
+
+# Set default environment variables for Cloud Run
+ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app:/app/rox
 
-# Default command runs the FastAPI server
-# To run as LiveKit agent, override with: docker run <image> python main.py connect --room <room> --url <url> ...
-CMD ["python", "main.py", "--server"]
+# Health check for Cloud Run
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+# Default command runs the FastAPI server for HTTP requests
+# Cloud Run will send HTTP requests to trigger agent creation
+CMD ["python", "-m", "uvicorn", "rox.main:app", "--host", "0.0.0.0", "--port", "8080"]
