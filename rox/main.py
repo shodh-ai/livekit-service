@@ -487,6 +487,15 @@ class RoxAgent(Agent):
                     else:
                         logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
                 
+                elif tool_name == "setup_jupyter":
+                    # Setup Jupyter environment (navigate, select kernel, upload files)
+                    if self._frontend_client:
+                        await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, tool_name, parameters
+                        )
+                    else:
+                        logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
+
                 elif tool_name == "highlight_cell_for_doubt_resolution":
                     # Highlight a specific Jupyter cell for doubt resolution
                     if self._frontend_client:
@@ -506,30 +515,79 @@ class RoxAgent(Agent):
                 
                 # --- NEW FRONTEND VOCABULARY TOOLS ---
                 elif tool_name == 'display_visual_aid':
-                    # Pass-through: forward visualization request to frontend which will call Visualizer service
+                    # Failsafe: validate/sanitize params before forwarding to frontend/Visualizer
                     if self._frontend_client:
                         try:
-                            # Expect parameters like { "topic_context": str, "text_to_visualize": str }
-                            topic_context = parameters.get('topic_context', '')
-                            text_to_visualize = parameters.get('text_to_visualize') or parameters.get('prompt') or ''
+                            raw_params = parameters or {}
+                            topic_context = str(raw_params.get('topic_context', '') or '').strip()
 
-                            if not text_to_visualize:
-                                logger.warning("[display_visual_aid] Missing text_to_visualize; skipping frontend request")
+                            # Accept either 'text_to_visualize' or legacy 'prompt'
+                            raw_prompt = raw_params.get('text_to_visualize')
+                            if raw_prompt is None:
+                                raw_prompt = raw_params.get('prompt')
+
+                            # Normalize prompt to string
+                            if raw_prompt is None:
+                                prompt = ''
+                            elif isinstance(raw_prompt, (dict, list)):
+                                # Defensive: stringify complex objects
+                                prompt = json.dumps(raw_prompt, ensure_ascii=False)
                             else:
-                                # Use existing GENERATE_VISUALIZATION action with a prompt.
-                                # Frontend will detect 'prompt' and call the Visualizer service.
-                                await self._frontend_client.execute_visual_action(
+                                prompt = str(raw_prompt)
+
+                            prompt = prompt.strip()
+
+                            # Basic semantic validation: must contain at least one alphanumeric
+                            def _has_meaningful_text(s: str) -> bool:
+                                return any(ch.isalnum() for ch in s)
+
+                            if not prompt or not _has_meaningful_text(prompt):
+                                warn_msg = "Unable to generate a diagram: empty or non-meaningful prompt."
+                                logger.warning(f"[display_visual_aid] {warn_msg} params={raw_params}")
+                                # Notify user on frontend and skip
+                                await self._frontend_client.show_feedback(
                                     self._room,
                                     self.caller_identity,
-                                    'GENERATE_VISUALIZATION',
-                                    {
-                                        'prompt': text_to_visualize,
-                                        'topic_context': topic_context
-                                    }
+                                    feedback_type="error",
+                                    message=warn_msg,
+                                    duration_ms=5000
                                 )
-                                logger.info("[display_visual_aid] Forwarded prompt to frontend for visualization")
+                                continue
+
+                            # Truncate overly long prompts to protect downstream services
+                            MAX_PROMPT_LEN = 8000
+                            if len(prompt) > MAX_PROMPT_LEN:
+                                logger.info(f"[display_visual_aid] Truncating prompt from {len(prompt)} to {MAX_PROMPT_LEN} chars")
+                                prompt = prompt[:MAX_PROMPT_LEN]
+
+                            clean_payload = {
+                                'prompt': prompt,
+                                'topic_context': topic_context,
+                            }
+
+                            # Forward to frontend; it will call the Visualizer service
+                            ok = await self._frontend_client.execute_visual_action(
+                                self._room,
+                                self.caller_identity,
+                                'GENERATE_VISUALIZATION',
+                                clean_payload
+                            )
+                            if ok:
+                                logger.info("[display_visual_aid] Forwarded sanitized prompt to frontend for visualization")
+                            else:
+                                logger.error("[display_visual_aid] Frontend RPC returned failure for GENERATE_VISUALIZATION")
                         except Exception as e:
-                            logger.error(f"[display_visual_aid] Failed to forward to frontend: {e}", exc_info=True)
+                            logger.error(f"[display_visual_aid] Failed to process/forward visualization request: {e}", exc_info=True)
+                            try:
+                                await self._frontend_client.show_feedback(
+                                    self._room,
+                                    self.caller_identity,
+                                    feedback_type="error",
+                                    message="Visualization failed due to an internal error.",
+                                    duration_ms=5000
+                                )
+                            except Exception:
+                                pass
                     else:
                         logger.warning(f"Frontend client not available - would forward display_visual_aid: {parameters}")
                 

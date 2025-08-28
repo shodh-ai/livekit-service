@@ -36,7 +36,6 @@ def build_ui_action_request(action_type: str, parameters: Dict[str, Any]) -> int
     
     elif action_type == "UPDATE_TEXT_CONTENT":
         payload = request_pb.update_text_content_payload
-        payload.target_element_id = str(parameters.get("target_element_id", ""))
         payload.text = str(parameters.get("text", ""))
         
     elif action_type == "HIGHLIGHT_TEXT_RANGES":
@@ -72,7 +71,7 @@ def build_ui_action_request(action_type: str, parameters: Dict[str, Any]) -> int
         if "clear_previous" in parameters:
             payload.clear_previous = bool(parameters["clear_previous"])
             
-    elif action_type == "HIGHLIGHT_TEXT_RANGES":
+    elif action_type == "HIGHLIGHT_ELEMENTS":
         # For highlight_elements -> HIGHLIGHT_TEXT_RANGES mapping
         element_ids = parameters.get("elementIds", [])
         for i, element_id in enumerate(element_ids):
@@ -82,6 +81,15 @@ def build_ui_action_request(action_type: str, parameters: Dict[str, Any]) -> int
                 end=0,
                 type="highlight"
             )
+    
+    elif action_type == "SUGGESTED_RESPONSES":
+        payload = request_pb.suggested_responses_payload
+        for resp in parameters.get("responses", []):
+            payload.responses.append(str(resp))
+        if "prompt" in parameters:
+            payload.prompt = str(parameters["prompt"])
+        if "group_id" in parameters:
+            payload.group_id = str(parameters["group_id"])
     
     else:
         # Fallback for simple actions that use the generic parameters map,

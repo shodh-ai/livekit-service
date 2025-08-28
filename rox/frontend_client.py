@@ -109,6 +109,8 @@ class FrontendClient:
             "highlight_element": "HIGHLIGHT_ELEMENT",
             "show_overlay": "SHOW_OVERLAY",
             "hide_overlay": "HIDE_OVERLAY",
+            # Jupyter setup
+            "setup_jupyter": "SETUP_JUPYTER",
             # Excalidraw Canvas Actions
             "clear_canvas": "EXCALIDRAW_CLEAR_CANVAS",
             "update_elements": "EXCALIDRAW_UPDATE_ELEMENTS",
