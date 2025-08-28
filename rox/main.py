@@ -100,14 +100,14 @@ def is_running_as_agent():
     return len(sys.argv) > 1 and ('connect' in sys.argv or '--room' in sys.argv)
 
 # FIXED: Only validate environment when running as agent, not during container startup
-if not is_running_tests() and is_running_as_agent():
-    logger.info("Running as LiveKit agent - validating environment...")
-    is_valid, message = validate_environment()
-    if not is_valid:
-        logger.error(f"Environment validation failed: {message}")
-        sys.exit(1)
-else:
-    logger.info("Not running as agent or in test mode - skipping environment validation")
+# if not is_running_tests() and is_running_as_agent():
+#     logger.info("Running as LiveKit agent - validating environment...")
+#     is_valid, message = validate_environment()
+#     if not is_valid:
+#         logger.error(f"Environment validation failed: {message}")
+#         sys.exit(1)
+# else:
+#     logger.info("Not running as agent or in test mode - skipping environment validation")
 
 
 class RoxAgent(Agent):
@@ -1130,7 +1130,7 @@ async def entrypoint(ctx: JobContext):
             sample_rate=24000
         ),
         vad=silero.VAD.load(),
-        turn_detection=MultilingualModel(),
+        # turn_detection=MultilingualModel(),
     )
     rox_agent_instance.agent_session = main_agent_session
 
