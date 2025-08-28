@@ -1,85 +1,84 @@
-# livekit-service/worker.py
+# livekit-service/worker.py - Updated for Cloud Run Job execution
 import os
 import sys
 import json
 import logging
+import asyncio
 from livekit import agents
 from rox.main import entrypoint
-from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class AgentStartRequest(BaseModel):
-    room_name: str
-    ws_url: str
-    api_key: str
-    api_secret: str
-    agent_identity: str
-    student_token_metadata: str
-
-def run_agent_from_task(task_payload: dict):
+def run_agent_from_env():
     """
-    Configures and runs a single LiveKit agent based on a task payload.
-    Uses the same proven approach as local_test_server.py after debugging.
+    Configures and runs a single LiveKit agent based on environment variables
+    set by the Cloud Run Job execution from Cloud Tasks.
     """
     try:
-        # Validate payload
-        request = AgentStartRequest(**task_payload)
+        # Read configuration from environment variables
+        ws_url = os.environ.get("LIVEKIT_URL")
+        api_key = os.environ.get("LIVEKIT_API_KEY")
+        api_secret = os.environ.get("LIVEKIT_API_SECRET")
+        room_name = os.environ.get("LIVEKIT_ROOM_NAME")
+        agent_identity = os.environ.get("AGENT_IDENTITY")
+        student_token_metadata = os.environ.get("STUDENT_TOKEN_METADATA")
         
-        logger.info(f"Worker received task. Starting agent for room: {request.room_name}")
-        logger.info(f"[DEBUG] Environment variables being set:")
-        logger.info(f"[DEBUG] LIVEKIT_URL: {request.ws_url}")
-        logger.info(f"[DEBUG] LIVEKIT_API_KEY: {request.api_key[:10]}...")
-        logger.info(f"[DEBUG] LIVEKIT_ROOM_NAME: {request.room_name}")
-
-        # Set environment variables for the agent process
-        os.environ["LIVEKIT_URL"] = request.ws_url
-        os.environ["LIVEKIT_API_KEY"] = request.api_key
-        os.environ["LIVEKIT_API_SECRET"] = request.api_secret
-        os.environ["LIVEKIT_ROOM_NAME"] = request.room_name
+        # Validate required environment variables
+        if not all([ws_url, api_key, api_secret, room_name]):
+            missing = [var for var, val in {
+                "LIVEKIT_URL": ws_url,
+                "LIVEKIT_API_KEY": api_key,
+                "LIVEKIT_API_SECRET": api_secret,
+                "LIVEKIT_ROOM_NAME": room_name
+            }.items() if not val]
+            logger.error(f"Missing required environment variables: {missing}")
+            sys.exit(1)
         
-        # Pass student metadata to the agent via an environment variable
-        # This is a robust way to get context into the JobContext
-        os.environ["STUDENT_TOKEN_METADATA"] = request.student_token_metadata
-
-        logger.info(f"[DEBUG] About to start agent worker programmatically...")
+        logger.info(f"Starting agent for room: {room_name}")
+        logger.info(f"Agent identity: {agent_identity}")
+        logger.info(f"WebSocket URL: {ws_url}")
+        logger.info(f"API Key: {api_key[:10]}...")
         
-        # Import asyncio to run the agent properly
-        import asyncio
+        if student_token_metadata:
+            logger.info(f"Student metadata: {student_token_metadata}")
         
-        # Create new event loop for this thread FIRST (critical fix from local_test_server)
+        # Create new event loop for this process
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
         try:
-            # Now create the worker with proper options (with event loop set)
+            # Create worker with the provided configuration
             worker_options = agents.WorkerOptions(
                 entrypoint_fnc=entrypoint,
-                ws_url=request.ws_url,
-                api_key=request.api_key,
-                api_secret=request.api_secret
+                ws_url=ws_url,
+                api_key=api_key,
+                api_secret=api_secret
             )
             worker = agents.Worker(worker_options)
+            
+            logger.info(f"Starting LiveKit agent worker for room {room_name}")
             loop.run_until_complete(worker.run())
+            
         finally:
             loop.close()
 
-        logger.info(f"Agent for room {request.room_name} has finished and worker is exiting.")
+        logger.info(f"Agent for room {room_name} has finished successfully")
 
     except SystemExit as se:
         logger.info(f"Agent exited with code: {se.code}")
+        sys.exit(se.code)
     except Exception as e:
-        logger.error(f"Failed to run agent from task: {e}", exc_info=True)
-        sys.exit(1) # Exit with error code so the task queue knows it failed
+        logger.error(f"Failed to run agent: {e}", exc_info=True)
+        sys.exit(1)  # Exit with error code so Cloud Run knows it failed
 
 if __name__ == "__main__":
-    # In a real Cloud Task worker, the payload comes from the POST body.
-    # This is a simple example of how to read it from stdin.
-    # Your Cloud Run service will simply parse the request body.
+    logger.info("LiveKit Agent Worker starting...")
+    logger.info("Environment variables:")
+    for key in ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_ROOM_NAME", "AGENT_IDENTITY"]:
+        value = os.environ.get(key, "NOT_SET")
+        if key == "LIVEKIT_API_KEY" and value != "NOT_SET":
+            value = value[:10] + "..."
+        logger.info(f"  {key}: {value}")
     
-    # This part is more conceptual. Your Cloud Run instance would be a FastAPI
-    # app with a single endpoint that receives the task and calls run_agent_from_task.
-    logger.info("Agent worker started. Waiting for task...")
-    # In a real scenario, a lightweight web framework like FastAPI would receive the POST
-    # from Cloud Tasks here. For simplicity, we assume the task is passed.
+    run_agent_from_env()
