@@ -58,4 +58,5 @@ jobs:
         gcloud run jobs update $JOB_NAME \
           --image=$REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:$GITHUB_SHA \
           --region=$REGION \
-          --project=$PROJECT_ID
+          --project=$PROJECT_ID \
+          --set-env-vars="LIVEKIT_API_KEY=${{ secrets.LIVEKIT_API_KEY }},LIVEKIT_API_SECRET=${{ secrets.LIVEKIT_API_SECRET }},LIVEKIT_URL=${{ secrets.LIVEKIT_URL }},DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }},GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }},LANGGRAPH_TUTOR_URL=${{ secrets.LANGGRAPH_TUTOR_URL }}"

@@ -23,6 +23,8 @@ def run_agent_from_env():
         room_name = os.environ.get("LIVEKIT_ROOM_NAME")
         agent_identity = os.environ.get("AGENT_IDENTITY")
         student_token_metadata = os.environ.get("STUDENT_TOKEN_METADATA")
+        deepgram_api_key = os.environ.get("DEEPGRAM_API_KEY")
+
         
         # Validate required environment variables
         if not all([ws_url, api_key, api_secret, room_name]):
@@ -75,7 +77,7 @@ def run_agent_from_env():
 if __name__ == "__main__":
     logger.info("LiveKit Agent Worker starting...")
     logger.info("Environment variables:")
-    for key in ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_ROOM_NAME", "AGENT_IDENTITY"]:
+    for key in ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_ROOM_NAME", "AGENT_IDENTITY", "STUDENT_TOKEN_METADATA", "DEEPGRAM_API_KEY"]:
         value = os.environ.get(key, "NOT_SET")
         if key == "LIVEKIT_API_KEY" and value != "NOT_SET":
             value = value[:10] + "..."
