@@ -44,7 +44,7 @@ from livekit.agents import Agent, JobContext, WorkerOptions
 from livekit.agents.llm import LLM, ChatChunk, ChoiceDelta, ChatContext
 from contextlib import asynccontextmanager
 from livekit.plugins import deepgram, silero
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+# from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # Local application imports
 from generated.protos import interaction_pb2
