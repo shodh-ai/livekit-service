@@ -1067,7 +1067,8 @@ async def entrypoint(ctx: JobContext):
     - Starts processing loop and agent session
     """
     logger.info("Starting Rox Conductor entrypoint")
-    
+    langgraph_url = os.getenv("LANGGRAPH_TUTOR_URL")
+    logger.info(f"LANGGRAPH_TUTOR_URL environment variable: {langgraph_url}")
     # Connect to the LiveKit room
     try:
         await ctx.connect()
@@ -1077,7 +1078,9 @@ async def entrypoint(ctx: JobContext):
         return
     
     # Create the Conductor instance
+    logger.info("Creating RoxAgent instance...")
     rox_agent_instance = RoxAgent()
+    logger.info("RoxAgent instance created successfully")
     ctx.rox_agent = rox_agent_instance  # Make agent findable by RPC service
     rox_agent_instance._room = ctx.room
     rox_agent_instance.session_id = ctx.room.name
@@ -1233,11 +1236,13 @@ async def entrypoint(ctx: JobContext):
 
     except Exception as e:
         logger.error(f"Failed to send 'agent_ready' handshake: {e}", exc_info=True)
-
+    logger.info(f"Number of remote participants: {len(ctx.room.remote_participants)}")
+    logger.info(f"Participant identities: {list(ctx.room.remote_participants.keys())}")
     logger.info("Conductor fully operational. Starting processing loop and agent session...")
-    
+    logger.info("Starting processing loop...")
     # Start the processing loop as a background task
     processing_task = asyncio.create_task(rox_agent_instance.processing_loop())
+    logger.info("Processing loop task created")
 
     # Start the main agent session for VAD/STT/TTS capabilities
     await main_agent_session.start(

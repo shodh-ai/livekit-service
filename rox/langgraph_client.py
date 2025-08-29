@@ -18,6 +18,7 @@ class LangGraphClient:
         # The URL should point to your new Student Tutor agent's base
         self.base_url = os.getenv("LANGGRAPH_TUTOR_URL", "https://kamikaze-765053940579.asia-south1.run.app")
         self.timeout = aiohttp.ClientTimeout(total=120.0)
+        logger.info(f"LangGraphClient initialized with base_url: {self.base_url}") 
 
     # --- SIGNATURE CHANGE ---
     async def invoke_langgraph_task(self, task: Dict, user_id: str, curriculum_id: str, session_id: str) -> Optional[Dict[str, Any]]:
