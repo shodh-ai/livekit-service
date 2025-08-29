@@ -77,7 +77,7 @@ def run_agent_from_env():
 if __name__ == "__main__":
     logger.info("LiveKit Agent Worker starting...")
     logger.info("Environment variables:")
-    for key in ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_ROOM_NAME", "AGENT_IDENTITY", "STUDENT_TOKEN_METADATA", "DEEPGRAM_API_KEY"]:
+    for key in ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_ROOM_NAME", "AGENT_IDENTITY", "STUDENT_TOKEN_METADATA", "DEEPGRAM_API_KEY", "LANGGRAPH_TUTOR_URL"]:
         value = os.environ.get(key, "NOT_SET")
         if key == "LIVEKIT_API_KEY" and value != "NOT_SET":
             value = value[:10] + "..."
