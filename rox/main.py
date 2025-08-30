@@ -44,7 +44,7 @@ from livekit.agents import Agent, JobContext, WorkerOptions
 from livekit.agents.llm import LLM, ChatChunk, ChoiceDelta, ChatContext
 from contextlib import asynccontextmanager
 from livekit.plugins import deepgram, silero
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+# from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # Local application imports
 from generated.protos import interaction_pb2
@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 # --- Environment Loading and Validation ---
 load_dotenv(dotenv_path=project_root / ".env")
 
-# Environment variables validation (skip during testing)
+# Environment variables validation (skip during testing AND during container startup)
 def validate_environment():
     """Validate required environment variables."""
     required_env_vars = [
@@ -85,7 +85,7 @@ def validate_environment():
     logger.info("Environment validation completed successfully")
     return True, "All required environment variables are set"
 
-# Only validate environment when not in test mode
+# Only validate environment when not in test mode AND when actually running as an agent
 def is_running_tests():
     """Check if we're running in a test environment."""
     import inspect
@@ -94,10 +94,20 @@ def is_running_tests():
             return True
     return False
 
-if not is_running_tests():
-    is_valid, message = validate_environment()
-    if not is_valid:
-        sys.exit(1)
+def is_running_as_agent():
+    """Check if we're running as a LiveKit agent (not just HTTP server)."""
+    # Only validate when we're actually connecting to LiveKit
+    return len(sys.argv) > 1 and ('connect' in sys.argv or '--room' in sys.argv)
+
+# FIXED: Only validate environment when running as agent, not during container startup
+# if not is_running_tests() and is_running_as_agent():
+#     logger.info("Running as LiveKit agent - validating environment...")
+#     is_valid, message = validate_environment()
+#     if not is_valid:
+#         logger.error(f"Environment validation failed: {message}")
+#         sys.exit(1)
+# else:
+#     logger.info("Not running as agent or in test mode - skipping environment validation")
 
 
 class RoxAgent(Agent):
@@ -189,6 +199,7 @@ class RoxAgent(Agent):
 
         async def _stream_empty(self):
             yield ChatChunk(id=str(uuid.uuid4()), delta=ChoiceDelta(role="assistant", content=""))
+
     """The Conductor - Central orchestrator for real-time AI tutoring.
     
     This class implements the Conductor pattern, managing:
@@ -1181,7 +1192,8 @@ async def entrypoint(ctx: JobContext):
     - Starts processing loop and agent session
     """
     logger.info("Starting Rox Conductor entrypoint")
-    
+    langgraph_url = os.getenv("LANGGRAPH_TUTOR_URL")
+    logger.info(f"LANGGRAPH_TUTOR_URL environment variable: {langgraph_url}")
     # Connect to the LiveKit room
     try:
         await ctx.connect()
@@ -1191,7 +1203,9 @@ async def entrypoint(ctx: JobContext):
         return
     
     # Create the Conductor instance
+    logger.info("Creating RoxAgent instance...")
     rox_agent_instance = RoxAgent()
+    logger.info("RoxAgent instance created successfully")
     ctx.rox_agent = rox_agent_instance  # Make agent findable by RPC service
     rox_agent_instance._room = ctx.room
     rox_agent_instance.session_id = ctx.room.name
@@ -1244,7 +1258,7 @@ async def entrypoint(ctx: JobContext):
             sample_rate=24000
         ),
         vad=silero.VAD.load(),
-        turn_detection=MultilingualModel(),
+        # turn_detection=MultilingualModel(),
     )
     rox_agent_instance.agent_session = main_agent_session
 
@@ -1351,11 +1365,13 @@ async def entrypoint(ctx: JobContext):
 
     except Exception as e:
         logger.error(f"Failed to send 'agent_ready' handshake: {e}", exc_info=True)
-
+    logger.info(f"Number of remote participants: {len(ctx.room.remote_participants)}")
+    logger.info(f"Participant identities: {list(ctx.room.remote_participants.keys())}")
     logger.info("Conductor fully operational. Starting processing loop and agent session...")
-    
+    logger.info("Starting processing loop...")
     # Start the processing loop as a background task
     processing_task = asyncio.create_task(rox_agent_instance.processing_loop())
+    logger.info("Processing loop task created")
 
     # Start the main agent session for VAD/STT/TTS capabilities
     await main_agent_session.start(

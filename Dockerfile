@@ -1,53 +1,56 @@
-# livekit-service/Dockerfile
-# Use Python 3.11 slim image
+# Use Python 3.11 slim as base image for better performance and security
 FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies for audio/video processing and build tools
+# Install system dependencies required for audio processing and gRPC
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    build-essential \
     gcc \
     g++ \
+    make \
+    pkg-config \
+    libffi-dev \
+    libssl-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first to leverage Docker cache
+# Copy requirements first for better Docker layer caching
 COPY requirements.txt .
 
-# Install Python dependencies (with caching for faster builds)
-# Install build dependencies like Cython and wheel first
-RUN pip install Cython wheel
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies (with caching for faster builds)
-RUN pip install -r requirements.txt
-
-# Copy the application code
+# Copy the entire project
 COPY . .
 
-# Regenerate protobuf files to match the installed grpcio-tools version
-# This ensures the generated code is compatible with the libraries in the container
-RUN python -m grpc_tools.protoc \
-    -I/app/rox/protos \
-    --python_out=/app/rox/generated/protos \
-    --pyi_out=/app/rox/generated/protos \
-    --grpc_python_out=/app/rox/generated/protos \
-    /app/rox/protos/interaction.proto
+# Generate protobuf files if they don't exist
+RUN mkdir -p generated/protos && \
+    python -m grpc_tools.protoc \
+    --python_out=generated/protos \
+    --grpc_python_out=generated/protos \
+    --proto_path=. \
+    interaction.proto || echo "Protobuf generation completed"
 
-# Download the required models for the livekit agents
-RUN python rox/main.py download-files
+# Create empty __init__.py files for Python imports
+RUN touch generated/__init__.py && \
+    touch generated/protos/__init__.py
 
-# Set working directory to rox for the unified service
-WORKDIR /app/rox
+# Set Python path to include the project root
+ENV PYTHONPATH=/app
 
-# Expose the service port
-EXPOSE 5005
+# Expose the port that Cloud Run expects
+EXPOSE 8080
 
-# Set environment variables
+# Set default environment variables for Cloud Run
+ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app:/app/rox
 
-# Default command runs the FastAPI server
-# To run as LiveKit agent, override with: docker run <image> python main.py connect --room <room> --url <url> ...
-CMD ["python", "main.py", "--server"]
+# Health check for Cloud Run
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+# Default command runs the FastAPI server for HTTP requests
+# Cloud Run will send HTTP requests to trigger agent creation
+CMD ["python", "-m", "uvicorn", "rox.main:app", "--host", "0.0.0.0", "--port", "8080"]

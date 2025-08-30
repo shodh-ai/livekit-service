@@ -1,0 +1,62 @@
+name: Deploy to Cloud Run Job
+
+on:
+  push:
+    branches:
+      - merging
+  pull_request:
+    branches:
+      - merging
+
+env:
+  PROJECT_ID: first-cedar-470107-j2
+  JOB_NAME: livekit-agent-runner
+  IMAGE_NAME: livekit-agent-worker
+  REGION: asia-south1  # Update if your job is in a different region
+  REGISTRY: asia-south1-docker.pkg.dev
+  REPOSITORY: livekit-service
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+        # Alternative: use workload identity federation (recommended)
+        # workload_identity_provider: projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider
+        # service_account: my-service-account@my-project.iam.gserviceaccount.com
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Configure Docker to use gcloud as a credential helper
+      run: |
+        gcloud auth configure-docker asia-south1-docker.pkg.dev
+
+    - name: Build Docker image
+      run: |
+        docker build -t $REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:$GITHUB_SHA .
+        docker tag $REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:$GITHUB_SHA $REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:latest
+
+    - name: Push Docker image to registry
+      run: |
+        docker push $REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:$GITHUB_SHA
+        docker push $REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:latest
+
+    - name: Update Cloud Run Job
+      run: |
+        gcloud run jobs update $JOB_NAME \
+          --image=$REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:$GITHUB_SHA \
+          --region=$REGION \
+          --project=$PROJECT_ID \
+          --set-env-vars="LIVEKIT_API_KEY=${{ secrets.LIVEKIT_API_KEY }},LIVEKIT_API_SECRET=${{ secrets.LIVEKIT_API_SECRET }},LIVEKIT_URL=${{ secrets.LIVEKIT_URL }},DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }},GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }},LANGGRAPH_TUTOR_URL=${{ secrets.LANGGRAPH_TUTOR_URL }}"

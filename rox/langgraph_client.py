@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 class LangGraphClient:
     def __init__(self):
         # The URL should point to your new Student Tutor agent's base
+
         # Support both LANGGRAPH_TUTOR_URL and legacy LANGGRAPH_API_URL
         self.base_url = os.getenv("LANGGRAPH_TUTOR_URL") or os.getenv("LANGGRAPH_API_URL", "http://localhost:8001")
         self.timeout = aiohttp.ClientTimeout(total=120.0)
@@ -67,6 +68,7 @@ class LangGraphClient:
         except Exception as e:
             logger.warning(f"Failed to fetch VNC visual context: {e}")
             return None
+
 
     # --- SIGNATURE CHANGE ---
     async def invoke_langgraph_task(self, task: Dict, user_id: str, curriculum_id: str, session_id: str) -> Optional[Dict[str, Any]]:
