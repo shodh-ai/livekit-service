@@ -8,7 +8,7 @@ Handles UI state changes and visual actions.
 import logging
 import uuid
 import base64
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from livekit import rtc
 from generated.protos import interaction_pb2
 from utils.ui_action_factory import build_ui_action_request
@@ -109,6 +109,8 @@ class FrontendClient:
             "highlight_element": "HIGHLIGHT_ELEMENT",
             "show_overlay": "SHOW_OVERLAY",
             "hide_overlay": "HIDE_OVERLAY",
+            # Jupyter setup
+            "setup_jupyter": "SETUP_JUPYTER",
             # Excalidraw Canvas Actions
             "clear_canvas": "EXCALIDRAW_CLEAR_CANVAS",
             "update_elements": "EXCALIDRAW_UPDATE_ELEMENTS",
@@ -124,6 +126,43 @@ class FrontendClient:
         
         action_type = action_type_map.get(tool_name, tool_name.upper())
         response = await self._send_rpc(room, identity, action_type, params)
+        return response is not None and response.success
+
+    async def send_suggested_responses(
+        self,
+        room: rtc.Room,
+        identity: str,
+        suggestions: Optional[List[Dict[str, Any]]] = None,
+        title: Optional[str] = None,
+        group_id: Optional[str] = None,
+        responses: Optional[List[str]] = None,
+    ) -> bool:
+        """
+        Send SUGGESTED_RESPONSES to the frontend. Supports both rich suggestions
+        (list of {id, text, reason}) and legacy responses (list of strings).
+
+        Args:
+            room: LiveKit room
+            identity: destination identity
+            suggestions: list of dicts with id/text/reason
+            title: optional title/header
+            group_id: optional correlation id
+            responses: legacy list of strings
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        params: Dict[str, Any] = {}
+        if suggestions:
+            params["suggestions"] = suggestions
+        if responses:
+            params["responses"] = responses
+        if title:
+            params["title"] = title
+        if group_id:
+            params["group_id"] = group_id
+
+        response = await self._send_rpc(room, identity, "SUGGESTED_RESPONSES", params)
         return response is not None and response.success
 
     async def highlight_element(self, room: rtc.Room, identity: str, element_id: str) -> bool:

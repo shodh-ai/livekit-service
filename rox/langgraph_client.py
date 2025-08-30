@@ -16,9 +16,59 @@ logger = logging.getLogger(__name__)
 class LangGraphClient:
     def __init__(self):
         # The URL should point to your new Student Tutor agent's base
-        self.base_url = os.getenv("LANGGRAPH_TUTOR_URL", "https://kamikaze-765053940579.asia-south1.run.app")
+
+        # Support both LANGGRAPH_TUTOR_URL and legacy LANGGRAPH_API_URL
+        self.base_url = os.getenv("LANGGRAPH_TUTOR_URL") or os.getenv("LANGGRAPH_API_URL", "http://localhost:8001")
         self.timeout = aiohttp.ClientTimeout(total=120.0)
-        logger.info(f"LangGraphClient initialized with base_url: {self.base_url}") 
+        self.vnc_http_url = os.getenv("VNC_LISTENER_HTTP_URL")  # e.g., http://localhost:8766
+        # Initialization logs for diagnostics
+        logger.info(f"LangGraphClient base_url={self.base_url}")
+        if self.vnc_http_url:
+            logger.info(f"LangGraphClient VNC_LISTENER_HTTP_URL set: {self.vnc_http_url}")
+        else:
+            logger.info("LangGraphClient VNC_LISTENER_HTTP_URL not set; visual_context will be omitted.")
+
+    async def _fetch_visual_context(self, session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
+        """Optionally fetch a screenshot from the VNC listener HTTP endpoint.
+
+        Returns None if not configured or on failure.
+        """
+        if not self.vnc_http_url:
+            logger.debug("VNC_LISTENER_HTTP_URL not configured; skipping visual context fetch.")
+            return None
+        url = self.vnc_http_url.rstrip('/') + "/screenshot"
+        try:
+            logger.debug(f"Fetching VNC visual context from: {url}")
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    logger.warning(f"VNC screenshot fetch non-200: {resp.status}")
+                    return None
+                data = await resp.json()
+                logger.debug(f"VNC /screenshot response keys: {list(data.keys())}")
+                success = data.get("success")
+                if success is False:
+                    logger.warning("VNC /screenshot returned success=false; skipping visual context.")
+                    return None
+                b64 = data.get("screenshot_b64")
+                if not b64:
+                    logger.info("VNC /screenshot returned no screenshot_b64; skipping visual context.")
+                    return None
+                b64_len = len(b64)
+                b64_preview = b64[:60]
+                if success is None:
+                    logger.info(f"Fetched VNC screenshot (no 'success' flag present) len={b64_len} preview={b64_preview}...")
+                else:
+                    logger.info(f"Fetched VNC screenshot_b64 len={b64_len} preview={b64_preview}...")
+                return {
+                    "source": "vnc_listener",
+                    "screenshot_b64": b64,
+                    "page_url": data.get("url"),
+                    "captured_at": data.get("timestamp"),
+                }
+        except Exception as e:
+            logger.warning(f"Failed to fetch VNC visual context: {e}")
+            return None
+
 
     # --- SIGNATURE CHANGE ---
     async def invoke_langgraph_task(self, task: Dict, user_id: str, curriculum_id: str, session_id: str) -> Optional[Dict[str, Any]]:
@@ -58,16 +108,27 @@ class LangGraphClient:
                     # Pass through interrupted_plan_context if provided
                     if task.get("interrupted_plan_context"):
                         request_body["interrupted_plan_context"] = task.get("interrupted_plan_context")
-                    # Pass visual_context if present
-                    if task.get("visual_context"):
-                        request_body["visual_context"] = task.get("visual_context")
+                    # Compose visual_context from task and optional VNC screenshot
+                    vc = task.get("visual_context") or {}
+                    vnc_vc = await self._fetch_visual_context(session)
+                    if vnc_vc:
+                        # Merge, task-provided fields take precedence
+                        merged = {**vnc_vc, **vc}
+                        request_body["visual_context"] = merged
+                    elif vc:
+                        request_body["visual_context"] = vc
                 else:
                     endpoint = "/handle_response"
                     # Add student_input for regular response
                     request_body["student_input"] = task.get("transcript", "")
-                    # Pass visual_context if present
-                    if task.get("visual_context"):
-                        request_body["visual_context"] = task.get("visual_context")
+                    # Compose visual_context from task and optional VNC screenshot
+                    vc = task.get("visual_context") or {}
+                    vnc_vc = await self._fetch_visual_context(session)
+                    if vnc_vc:
+                        merged = {**vnc_vc, **vc}
+                        request_body["visual_context"] = merged
+                    elif vc:
+                        request_body["visual_context"] = vc
                 
                 # --- ROBUSTNESS CHANGE: Construct URL safely ---
                 full_url = f"{self.base_url}{endpoint}"
@@ -77,10 +138,35 @@ class LangGraphClient:
                 if session_id:
                     request_body["session_id"] = session_id
 
+                # Log outgoing request for correlation (mask large base64 fields)
+                try:
+                    safe_body = dict(request_body)
+                    vc = safe_body.get("visual_context")
+                    if isinstance(vc, dict):
+                        vc_masked = dict(vc)
+                        b64 = vc_masked.get("screenshot_b64") or ""
+                        if b64:
+                            vc_masked["screenshot_b64"] = f"[len={len(b64)} preview={b64[:60]}...]"
+                        vc_masked["has_screenshot_b64"] = bool(b64)
+                        safe_body["visual_context"] = vc_masked
+                    logger.info(f"LangGraphClient POST {full_url} body: {json.dumps(safe_body, ensure_ascii=False)}")
+                except Exception:
+                    # Fallback to repr if JSON serialization fails
+                    logger.info(f"LangGraphClient POST {full_url} body(repr): {request_body!r}")
+
                 async with session.post(full_url, json=request_body) as response:
                     response.raise_for_status()
-                    
-                    response_data = await response.json()
+                    logger.info(f"LangGraphClient response status: {response.status}")
+
+                    # Try to parse JSON, otherwise capture text
+                    try:
+                        response_data = await response.json()
+                        logger.info(f"LangGraphClient response JSON: {json.dumps(response_data, ensure_ascii=False)}")
+                    except Exception:
+                        response_text = await response.text()
+                        logger.info(f"LangGraphClient response text: {response_text}")
+                        # If not JSON, we can't proceed as expected
+                        return None
                     
                     # The actual LangGraph service returns {"delivery_plan": delivery_plan}
                     # We need to wrap it in the format the main agent loop expects
