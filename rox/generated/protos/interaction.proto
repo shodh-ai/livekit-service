@@ -165,6 +165,17 @@ message ReplaceTextRangePayloadProto {
   int32 end = 2;          // End index of the range
   string replacement = 3; // The text to replace the range with
 }
+// Suggested responses (quick replies) payloads
+message SuggestedResponseProto {
+  string id = 1;           // Unique identifier for the suggestion
+  string text = 2;         // Text to show as a quick reply
+  optional string reason = 3; // Optional: brief reason or label
+}
+
+message SuggestedResponsesPayloadProto {
+  repeated SuggestedResponseProto suggestions = 1; // List of suggestions
+  optional string title = 2; // Optional title/header to display above suggestions
+}
 // Optional: Service the frontend could implement (called by agent for updates)
 // service ClientNotification {
 //   rpc NotifyClient(AgentUpdate) returns (Empty);
@@ -254,13 +265,14 @@ enum ClientUIActionType {
   UPLOAD_FILE_TO_JUPYTER = 62;          // Upload a file to Jupyter notebook environment
   HIGHLIGHT_CELL_FOR_DOUBT_RESOLUTION = 63;
   EXCALIDRAW_CLEAR_CANVAS = 64;         // Clear all elements from Excalidraw canvas
-  EXCALIDRAW_UPDATE_ELEMENTS = 65;      // Update existing elements on canvas
+  EXCALIDRAW_UPDATE_ELEMENTS = 74;      // Update existing elements on canvas (moved to avoid collision)
   EXCALIDRAW_REMOVE_HIGHLIGHTING = 66;  // Remove all highlighting from canvas
   EXCALIDRAW_HIGHLIGHT_ELEMENTS_ADVANCED = 67; // Advanced highlighting with custom options
   EXCALIDRAW_MODIFY_ELEMENTS = 68;      // Modify existing canvas elements
   EXCALIDRAW_CAPTURE_SCREENSHOT = 69;   // Capture canvas screenshot
   EXCALIDRAW_GET_CANVAS_ELEMENTS = 70;  // Get current canvas elements
   EXCALIDRAW_SET_GENERATING = 71;       // Set generating state for UI
+  SUGGESTED_RESPONSES = 65;             // Show selectable suggested responses to the user (aligned with frontend)
 }
 // Request from Agent to Client to perform a UI action
 message AgentToClientUIActionRequest {
@@ -280,6 +292,7 @@ message AgentToClientUIActionRequest {
   optional DisplayRemarksListPayloadProto display_remarks_list_payload = 14; // Payload for DISPLAY_REMARKS_LIST
   optional UpdateTextContentPayloadProto update_text_content_payload = 15; // Payload for UPDATE_TEXT_CONTENT
   optional ReplaceTextRangePayloadProto replace_text_range_payload = 16; // Payload for REPLACE_TEXT_RANGE
+  optional SuggestedResponsesPayloadProto suggested_responses_payload = 17; // Payload for SUGGESTED_RESPONSES
                                       // For SHOW_ALERT: {"message": "Hello!", "type": "info/error/warning"}
                                       // For UPDATE_TEXT_CONTENT: {"text": "New content"}
                                       // For TOGGLE_ELEMENT_VISIBILITY: {"visible": "true/false"} (or just toggle)

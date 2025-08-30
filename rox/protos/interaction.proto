@@ -165,11 +165,16 @@ message ReplaceTextRangePayloadProto {
   int32 end = 2;          // End index of the range
   string replacement = 3; // The text to replace the range with
 }
-// Payload for suggested responses shown in UI
+// Suggested responses (quick replies) payloads
+message SuggestedResponseProto {
+  string id = 1;           // Unique identifier for the suggestion
+  string text = 2;         // Text to show as a quick reply
+  optional string reason = 3; // Optional: brief reason or label
+}
+
 message SuggestedResponsesPayloadProto {
-  repeated string responses = 1; // Suggested response options
-  optional string prompt = 2;    // Optional prompt/title for the suggestions
-  optional string group_id = 3;  // Correlates a suggestion set
+  repeated SuggestedResponseProto suggestions = 1; // List of suggestions
+  optional string title = 2; // Optional title/header to display above suggestions
 }
 // Optional: Service the frontend could implement (called by agent for updates)
 // service ClientNotification {
@@ -263,14 +268,14 @@ enum ClientUIActionType {
   SETUP_JUPYTER = 72;                   // Setup Jupyter environment (navigate, activate Pyodide, upload files)
 
   EXCALIDRAW_CLEAR_CANVAS = 64;         // Clear all elements from Excalidraw canvas
-  EXCALIDRAW_UPDATE_ELEMENTS = 65;      // Update existing elements on canvas
+  EXCALIDRAW_UPDATE_ELEMENTS = 74;      // Update existing elements on canvas (moved to avoid collision)
   EXCALIDRAW_REMOVE_HIGHLIGHTING = 66;  // Remove all highlighting from canvas
   EXCALIDRAW_HIGHLIGHT_ELEMENTS_ADVANCED = 67; // Advanced highlighting with custom options
   EXCALIDRAW_MODIFY_ELEMENTS = 68;      // Modify existing canvas elements
   EXCALIDRAW_CAPTURE_SCREENSHOT = 69;   // Capture canvas screenshot
   EXCALIDRAW_GET_CANVAS_ELEMENTS = 70;  // Get current canvas elements
   EXCALIDRAW_SET_GENERATING = 71;       // Set generating state for UI
-  SUGGESTED_RESPONSES = 73;             // Show selectable suggested responses to the user
+  SUGGESTED_RESPONSES = 65;             // Show selectable suggested responses to the user (aligned with frontend)
 }
 // Request from Agent to Client to perform a UI action
 message AgentToClientUIActionRequest {

@@ -71,6 +71,60 @@ class AgentInteractionService:
             )
             return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
+    async def InvokeAgentTask(self, raw_payload: RpcInvocationData) -> str:
+        """Handle generic task invocation from the frontend.
+        
+        Expects a base64-encoded InvokeAgentTaskRequest payload.
+        Decodes, enqueues the task for processing, and returns an AgentResponse.
+        """
+        logger.info("[RPC] Received InvokeAgentTask")
+        try:
+            # Decode protobuf request from base64
+            try:
+                req_bytes = base64.b64decode(raw_payload.payload)
+                request_pb = interaction_pb2.InvokeAgentTaskRequest()
+                request_pb.ParseFromString(req_bytes)
+            except Exception as de:
+                logger.error(f"Failed to decode InvokeAgentTaskRequest: {de}")
+                error_response = interaction_pb2.AgentResponse(
+                    status_message=f"Invalid InvokeAgentTaskRequest: {de}",
+                    data_payload="",
+                )
+                return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
+
+            task_name = request_pb.task_name or ""
+            json_payload = request_pb.json_payload or "{}"
+
+            if not self.agent:
+                logger.error("Agent not available to process InvokeAgentTask")
+                error_response = interaction_pb2.AgentResponse(
+                    status_message="Agent not available",
+                    data_payload="",
+                )
+                return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
+
+            # Build and enqueue task for the Conductor's processing loop
+            task = {
+                "task_name": task_name,
+                "json_payload": json_payload,
+                "caller_identity": getattr(raw_payload, 'caller_identity', None),
+            }
+            await self.agent._processing_queue.put(task)
+            logger.info(f"Queued InvokeAgentTask: {task_name}")
+
+            response_pb = interaction_pb2.AgentResponse(
+                status_message=f"Task '{task_name}' enqueued",
+                data_payload="",
+            )
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+
+        except Exception as e:
+            logger.error(f"Error in InvokeAgentTask: {e}", exc_info=True)
+            error_response = interaction_pb2.AgentResponse(
+                status_message=f"Error processing task: {str(e)}"
+            )
+            return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
+
     async def student_mic_button_interrupt(self, raw_payload: RpcInvocationData) -> str:
         """Handle mic button press interruption from the student.
         

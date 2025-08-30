@@ -83,13 +83,63 @@ def build_ui_action_request(action_type: str, parameters: Dict[str, Any]) -> int
             )
     
     elif action_type == "SUGGESTED_RESPONSES":
+        # Populate the aligned payload: suggestions (id,text,reason) and title
         payload = request_pb.suggested_responses_payload
-        for resp in parameters.get("responses", []):
-            payload.responses.append(str(resp))
-        if "prompt" in parameters:
-            payload.prompt = str(parameters["prompt"])
-        if "group_id" in parameters:
-            payload.group_id = str(parameters["group_id"])
+
+        suggestions_param = parameters.get("suggestions")
+        responses_param = parameters.get("responses")
+
+        normalized_suggestions = []
+        if isinstance(suggestions_param, list) and suggestions_param:
+            # Rich suggestions provided
+            for s in suggestions_param:
+                if isinstance(s, dict):
+                    ent = payload.suggestions.add()
+                    ent.id = str(s.get("id", ""))
+                    ent.text = str(s.get("text", ""))
+                    if s.get("reason") is not None:
+                        ent.reason = str(s.get("reason"))
+                    normalized_suggestions.append({
+                        "id": ent.id,
+                        "text": ent.text,
+                        "reason": getattr(ent, "reason", "")
+                    })
+                else:
+                    ent = payload.suggestions.add()
+                    ent.id = ""
+                    ent.text = str(s)
+                    normalized_suggestions.append({"id": "", "text": ent.text, "reason": ""})
+        elif isinstance(responses_param, list) and responses_param:
+            # Legacy responses list (array of strings)
+            for resp in responses_param:
+                ent = payload.suggestions.add()
+                ent.id = ""
+                ent.text = str(resp)
+                normalized_suggestions.append({"id": "", "text": ent.text, "reason": ""})
+
+        # Title handling (map prompt -> title for compatibility)
+        title = parameters.get("title")
+        prompt = parameters.get("prompt")
+        if title is not None:
+            payload.title = str(title)
+        elif prompt is not None:
+            payload.title = str(prompt)
+
+        # Also populate generic parameters so frontends can parse without strict proto alignment
+        try:
+            if normalized_suggestions:
+                request_pb.parameters["suggestions"] = json.dumps(normalized_suggestions)
+                request_pb.parameters["responses"] = json.dumps([s["text"] for s in normalized_suggestions])
+            if title is not None:
+                request_pb.parameters["title"] = str(title)
+            if prompt is not None and "prompt" not in request_pb.parameters:
+                request_pb.parameters["prompt"] = str(prompt)
+            # Preserve group_id for any correlation use in clients
+            if parameters.get("group_id") is not None:
+                request_pb.parameters["group_id"] = str(parameters.get("group_id"))
+        except Exception:
+            # Non-fatal: parameters map is best-effort
+            logger.debug("Failed to populate generic parameters for SUGGESTED_RESPONSES", exc_info=True)
     
     else:
         # Fallback for simple actions that use the generic parameters map,

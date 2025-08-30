@@ -308,6 +308,52 @@ class RoxAgent(Agent):
                 # 3. Extract the action script (delivery_plan) and execute it
                 delivery_plan = response.get("delivery_plan", {})
                 actions = delivery_plan.get("actions", [])
+                # Also read optional metadata for UI hints (e.g., suggested responses)
+                metadata = delivery_plan.get("metadata", {}) if isinstance(delivery_plan, dict) else {}
+
+                # Proactively emit Suggested Responses if provided only in metadata
+                try:
+                    if metadata:
+                        meta_suggestions = metadata.get("suggested_responses") or metadata.get("suggestions") or metadata.get("responses")
+                        meta_title = metadata.get("title") or metadata.get("prompt")
+
+                        if meta_suggestions:
+                            try:
+                                count = len(meta_suggestions) if isinstance(meta_suggestions, list) else 0
+                            except Exception:
+                                count = 0
+                            logger.info(f"[META] Found suggested responses in delivery_plan.metadata: count={count}, title={meta_title!r}")
+
+                            if self._frontend_client:
+                                try:
+                                    # Accept both rich objects and plain strings
+                                    if isinstance(meta_suggestions, list) and all(isinstance(x, str) for x in meta_suggestions):
+                                        ok = await self._frontend_client.send_suggested_responses(
+                                            self._room,
+                                            self.caller_identity,
+                                            responses=meta_suggestions,
+                                            title=meta_title,
+                                        )
+                                    else:
+                                        ok = await self._frontend_client.send_suggested_responses(
+                                            self._room,
+                                            self.caller_identity,
+                                            suggestions=meta_suggestions,
+                                            title=meta_title,
+                                        )
+
+                                    if ok:
+                                        logger.info(f"[META] Dispatched SUGGESTED_RESPONSES to frontend successfully (count={count})")
+                                    else:
+                                        logger.error("[META] Frontend RPC returned failure for SUGGESTED_RESPONSES from metadata")
+                                except Exception as e:
+                                    logger.error(f"[META] Failed sending SUGGESTED_RESPONSES from metadata: {e}", exc_info=True)
+                            else:
+                                logger.warning("[META] Frontend client not available - would send SUGGESTED_RESPONSES from metadata")
+                        else:
+                            logger.debug("[META] No suggested responses present in delivery_plan.metadata")
+                except Exception:
+                    logger.debug("[META] Error while inspecting/sending metadata-based suggested responses", exc_info=True)
                 
                 # Reset cancellation flag AND pause flag before executing interruption response
                 # This ensures interruption responses (speak, listen, etc.) always run
@@ -638,6 +684,27 @@ class RoxAgent(Agent):
                         logger.info(f"Showed feedback: {parameters.get('message', '')}")
                     else:
                         logger.warning(f"Frontend client not available - would show feedback: {parameters.get('message', '')}")
+                
+                elif tool_name in ["suggested_responses", "show_suggested_responses", "SUGGESTED_RESPONSES"]:
+                    # Emit quick reply suggestions to the frontend
+                    if self._frontend_client:
+                        try:
+                            ok = await self._frontend_client.send_suggested_responses(
+                                self._room,
+                                self.caller_identity,
+                                suggestions=parameters.get('suggestions'),
+                                title=parameters.get('title') or parameters.get('prompt'),
+                                group_id=parameters.get('group_id'),
+                                responses=parameters.get('responses'),
+                            )
+                            if ok:
+                                logger.info(f"Sent suggested responses: title={parameters.get('title') or parameters.get('prompt')}, count={len(parameters.get('suggestions') or parameters.get('responses') or [])}")
+                            else:
+                                logger.error("Frontend RPC returned failure for SUGGESTED_RESPONSES")
+                        except Exception as e:
+                            logger.error(f"Failed to send suggested responses: {e}", exc_info=True)
+                    else:
+                        logger.warning("Frontend client not available - would send suggested responses")
                 
                 elif tool_name == "listen":
                     logger.info("Preparing to listen, adding a pre-listen delay...")
@@ -1227,6 +1294,10 @@ async def entrypoint(ctx: JobContext):
     logger.info("Registering specialized RPC handlers...")
     try:
         # Register the new specialized handlers
+        local_participant.register_rpc_method(
+            f"{service_name}/InvokeAgentTask", 
+            agent_rpc_service.InvokeAgentTask
+        )
         local_participant.register_rpc_method(
             f"{service_name}/student_wants_to_interrupt", 
             agent_rpc_service.student_wants_to_interrupt
