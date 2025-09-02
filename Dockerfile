@@ -60,3 +60,5 @@ CMD if [ -n "$LIVEKIT_URL" ] && [ -n "$ROOM_NAME" ]; then \
       echo "Starting as HTTP Server"; \
       python -m uvicorn rox.main:app --host 0.0.0.0 --port 8080; \
     fi
+
+    
