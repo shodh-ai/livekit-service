@@ -60,6 +60,5 @@ jobs:
           --region=$REGION \
           --command="python" \
           --args="worker.py" \
-
           --project=$PROJECT_ID \
           --update-secrets="LIVEKIT_API_KEY=LIVEKIT_API_KEY:latest,LIVEKIT_API_SECRET=LIVEKIT_API_SECRET:latest,LIVEKIT_URL=LIVEKIT_URL:latest,DEEPGRAM_API_KEY=DEEPGRAM_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,LANGGRAPH_TUTOR_URL=LANGGRAPH_TUTOR_URL:latest"
