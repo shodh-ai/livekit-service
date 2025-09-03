@@ -1210,6 +1210,50 @@ async def entrypoint(ctx: JobContext):
     rox_agent_instance._room = ctx.room
     rox_agent_instance.session_id = ctx.room.name
 
+    # --- Participant disconnect handling: auto-shutdown when student leaves ---
+    async def _handle_participant_disconnected(participant: rtc.RemoteParticipant):
+        logger.info(f"Participant disconnected: {participant.identity}")
+        # Only shut down if the student (caller_identity) leaves
+        if participant.identity == rox_agent_instance.caller_identity:
+            logger.warning(f"Student '{participant.identity}' has left the room. Shutting down agent.")
+            ctx.shutdown()
+
+    # LiveKit `.on()` expects a sync callback. Use a wrapper that schedules the async task.
+    def on_participant_disconnected(participant: rtc.RemoteParticipant):
+        asyncio.create_task(_handle_participant_disconnected(participant))
+
+    # Register the disconnect listener
+    ctx.room.on("participant_disconnected", on_participant_disconnected)
+
+    # --- Startup timeout: shut down if no student joins within timeout ---
+    shutdown_timeout_seconds = int(os.getenv("ROX_NO_SHOW_TIMEOUT_SECONDS", "60"))
+
+    async def shutdown_if_no_student():
+        logger.info(f"Agent will shut down in {shutdown_timeout_seconds}s if no student joins.")
+        try:
+            await asyncio.sleep(shutdown_timeout_seconds)
+        except asyncio.CancelledError:
+            logger.info("No-show shutdown task cancelled (student joined).")
+            return
+
+        # If this task wasn't cancelled and no caller identity is set, no student joined
+        if not rox_agent_instance.caller_identity:
+            logger.warning("No student joined within the timeout period. Shutting down agent.")
+            ctx.shutdown()
+
+    shutdown_task = asyncio.create_task(shutdown_if_no_student())
+
+    # Cancel the shutdown timer if a participant connects
+    async def _on_participant_connected(participant: rtc.RemoteParticipant):
+        logger.info(f"Participant connected: {participant.identity}. Cancelling no-show shutdown task.")
+        if not shutdown_task.done():
+            shutdown_task.cancel()
+
+    def on_participant_connected(participant: rtc.RemoteParticipant):
+        asyncio.create_task(_on_participant_connected(participant))
+
+    ctx.room.on("participant_connected", on_participant_connected)
+
     # --- NEW: Read metadata from the token and populate agent state ---
     try:
         local_participant = ctx.room.local_participant
@@ -1257,7 +1301,12 @@ async def entrypoint(ctx: JobContext):
             encoding="linear16",
             sample_rate=24000
         ),
-        vad=silero.VAD.load(),
+        vad=silero.VAD.load(
+            # Wait ~1s of silence before end-of-speech
+            min_silence_duration=1.0,
+            # Optional: small prefix padding at start of speech chunks
+            prefix_padding_duration=0.2,
+        ),
         # turn_detection=MultilingualModel(),
     )
     rox_agent_instance.agent_session = main_agent_session
