@@ -26,9 +26,10 @@ project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 # FastAPI imports for HTTP service mode
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 try:
     from model import AgentRequest
 except ImportError:
@@ -53,6 +54,7 @@ from langgraph_client import LangGraphClient
 from frontend_client import FrontendClient
 # from gemini_tts_client import GeminiTTSClient
 from utils.ui_action_factory import build_ui_action_request
+from browser_pod_client import BrowserPodClient
 
 # Configure logging
 logging.basicConfig(
@@ -254,6 +256,8 @@ class RoxAgent(Agent):
         self._langgraph_client = LangGraphClient()
         # Frontend client enabled for visual actions
         self._frontend_client = FrontendClient()
+        # Browser pod client for LiveKit data-channel control
+        self._browser_pod_client = BrowserPodClient()
         # Keep other clients disabled for now
         self._gemini_tts_client = None
         logger.info("LangGraph client initialized - RPC forwarding enabled")
@@ -261,6 +265,10 @@ class RoxAgent(Agent):
         # LiveKit components
         self._room: Optional[rtc.Room] = None
         self.agent_session: Optional[agents.AgentSession] = None
+        # One-time guard to avoid sending initial navigate more than once
+        self._initial_nav_sent: bool = False
+        # Guard to avoid registering the browser join callback multiple times
+        self._browser_join_cb_registered: bool = False
         
         logger.info("RoxAgent Conductor initialized")
 
@@ -284,7 +292,77 @@ class RoxAgent(Agent):
 
                 # --- Handle special local tasks that don't need LangGraph ---
                 task_name = task.get('task_name')
-                
+
+                # On session start, proactively instruct the browser pod to navigate to example.com
+                if task_name == "start_tutoring_session":
+                    try:
+                        browser_pod_identity = None
+                        if self._room is not None and getattr(self._room, "name", None):
+                            browser_pod_identity = f"browser-bot-{self._room.name}"
+                        # Fallback to session_id if present
+                        if not browser_pod_identity and getattr(self, "session_id", None):
+                            browser_pod_identity = f"browser-bot-{self.session_id}"
+
+                        if self._browser_pod_client and self._room and browser_pod_identity:
+                            # Wait briefly for the browser pod to join the room before sending the command
+                            wait_sec = float(os.getenv("BROWSER_JOIN_WAIT_SEC", "6"))
+                            interval = 0.2
+                            attempts = int(max(1, wait_sec / interval))
+                            seen = False
+                            try:
+                                for _ in range(attempts):
+                                    rp = getattr(self._room, "remote_participants", {})
+                                    if isinstance(rp, dict) and browser_pod_identity in rp:
+                                        seen = True
+                                        break
+                                    await asyncio.sleep(interval)
+                            except Exception:
+                                # Non-fatal; proceed best-effort
+                                pass
+
+                            if not seen:
+                                logger.warning(f"[AUTO] Browser pod '{browser_pod_identity}' not present after {wait_sec:.1f}s; skipping initial navigate")
+                                # Fallback: watch for late join and send once when present
+                                max_watch_sec = float(os.getenv("BROWSER_JOIN_WATCH_SEC", "60"))
+                                async def _watch_and_send():
+                                    try:
+                                        steps = int(max(1, max_watch_sec / 0.5))
+                                        for _ in range(steps):
+                                            if self._initial_nav_sent:
+                                                return
+                                            rp2 = getattr(self._room, "remote_participants", {})
+                                            if isinstance(rp2, dict) and browser_pod_identity in rp2:
+                                                try:
+                                                    await self._browser_pod_client.send_browser_command(
+                                                        self._room,
+                                                        browser_pod_identity,
+                                                        "browser_navigate",
+                                                        {"url": "https://www.example.com"},
+                                                    )
+                                                    self._initial_nav_sent = True
+                                                    logger.info(f"[AUTO][watch] Sent initial navigate to example.com -> {browser_pod_identity}")
+                                                except Exception as e:
+                                                    logger.error(f"[AUTO][watch] Failed to send initial navigate: {e}")
+                                                return
+                                            await asyncio.sleep(0.5)
+                                        logger.warning(f"[AUTO][watch] Browser pod '{browser_pod_identity}' did not join within {max_watch_sec:.1f}s")
+                                    except Exception:
+                                        logger.debug("[AUTO][watch] error while waiting for browser join", exc_info=True)
+                                asyncio.create_task(_watch_and_send())
+                            else:
+                                await self._browser_pod_client.send_browser_command(
+                                    self._room,
+                                    browser_pod_identity,
+                                    "browser_navigate",
+                                    {"url": "https://www.example.com"},
+                                )
+                                logger.info(f"[AUTO] Sent initial navigate to example.com -> {browser_pod_identity}")
+                                self._initial_nav_sent = True
+                        else:
+                            logger.warning("[AUTO] Cannot send initial navigate: room or browser identity not available")
+                    except Exception as e:
+                        logger.error(f"[AUTO] Failed to send initial navigate: {e}")
+
                 if task_name == "student_stopped_listening":
                     # Handle manual mic-off: process any pending transcript
                     logger.info("[MANUAL_STOP] Processing manual mic turn-off")
@@ -489,14 +567,38 @@ class RoxAgent(Agent):
                     else:
                         logger.warning("No text to speak or agent_session not available")
                 
-                elif tool_name in ["draw", "browser_navigate", "browser_click", "browser_type"]:
-                    # Execute visual actions on the frontend
+                elif tool_name == "draw":
+                    # Execute drawing on the frontend
                     if self._frontend_client:
                         await self._frontend_client.execute_visual_action(
                             self._room, self.caller_identity, tool_name, parameters
                         )
                     else:
                         logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
+
+                elif tool_name in [
+                    "browser_navigate",
+                    "browser_click",
+                    "browser_type",
+                    "jupyter_type_in_cell",
+                    "jupyter_run_cell",
+                    "setup_jupyter",
+                ]:
+                    # Send commands to the browser pod over LiveKit data channel
+                    browser_pod_identity = f"browser-bot-{self.session_id}" if self.session_id else None
+                    if self._browser_pod_client and self._room and browser_pod_identity:
+                        try:
+                            await self._browser_pod_client.send_browser_command(
+                                self._room,
+                                browser_pod_identity,
+                                tool_name,
+                                parameters,
+                            )
+                            logger.info(f"Sent {tool_name} to browser pod {browser_pod_identity}")
+                        except Exception as e:
+                            logger.error(f"Failed to send {tool_name} to browser pod: {e}")
+                    else:
+                        logger.warning("Browser Pod client or room/session_id not available; cannot send browser action")
                 
                 # --- Advanced Jupyter Notebook Actions (Script Player Support) ---
                 elif tool_name == "jupyter_type_in_cell":
@@ -1210,20 +1312,38 @@ async def entrypoint(ctx: JobContext):
     rox_agent_instance._room = ctx.room
     rox_agent_instance.session_id = ctx.room.name
 
-    # --- Participant disconnect handling: auto-shutdown when student leaves ---
-    async def _handle_participant_disconnected(participant: rtc.RemoteParticipant):
-        logger.info(f"Participant disconnected: {participant.identity}")
-        # Only shut down if the student (caller_identity) leaves
-        if participant.identity == rox_agent_instance.caller_identity:
-            logger.warning(f"Student '{participant.identity}' has left the room. Shutting down agent.")
-            ctx.shutdown()
+    # --- Participant disconnect handling: delayed shutdown with grace window ---
+    student_disconnect_grace = float(os.getenv("STUDENT_DISCONNECT_GRACE_SEC", "12"))
+    student_disconnect_task: asyncio.Task | None = None
 
-    # LiveKit `.on()` expects a sync callback. Use a wrapper that schedules the async task.
-    def on_participant_disconnected(participant: rtc.RemoteParticipant):
-        asyncio.create_task(_handle_participant_disconnected(participant))
+    async def _delayed_student_shutdown(identity: str):
+        try:
+            await asyncio.sleep(student_disconnect_grace)
+            # If still the recorded caller and no reconnect cancelled us, shutdown
+            if identity and identity == rox_agent_instance.caller_identity:
+                logger.warning(f"Student '{identity}' did not reconnect within {student_disconnect_grace:.1f}s. Shutting down agent.")
+                ctx.shutdown()
+        except asyncio.CancelledError:
+            logger.info("Student reconnect detected before grace timeout; not shutting down.")
+        except Exception:
+            logger.debug("error in delayed student shutdown task", exc_info=True)
+
+    def _on_participant_disconnected(participant: rtc.RemoteParticipant):
+        nonlocal student_disconnect_task
+        try:
+            logger.info(f"Participant disconnected: {participant.identity}")
+            # Only act if the student (caller_identity) leaves
+            if participant.identity == rox_agent_instance.caller_identity:
+                # Cancel any existing shutdown task first
+                if student_disconnect_task and not student_disconnect_task.done():
+                    student_disconnect_task.cancel()
+                # Schedule delayed shutdown
+                student_disconnect_task = asyncio.create_task(_delayed_student_shutdown(participant.identity))
+        except Exception:
+            logger.debug("participant_disconnected handler error", exc_info=True)
 
     # Register the disconnect listener
-    ctx.room.on("participant_disconnected", on_participant_disconnected)
+    ctx.room.on("participant_disconnected", _on_participant_disconnected)
 
     # --- Startup timeout: shut down if no student joins within timeout ---
     shutdown_timeout_seconds = int(os.getenv("ROX_NO_SHOW_TIMEOUT_SECONDS", "60"))
@@ -1243,16 +1363,22 @@ async def entrypoint(ctx: JobContext):
 
     shutdown_task = asyncio.create_task(shutdown_if_no_student())
 
-    # Cancel the shutdown timer if a participant connects
-    async def _on_participant_connected(participant: rtc.RemoteParticipant):
-        logger.info(f"Participant connected: {participant.identity}. Cancelling no-show shutdown task.")
-        if not shutdown_task.done():
-            shutdown_task.cancel()
+    # Cancel the shutdown timer if a participant connects (sync callback is enough)
+    def _cancel_no_show_on_connect(participant: rtc.RemoteParticipant):
+        try:
+            logger.info(f"Participant connected: {participant.identity}. Cancelling no-show shutdown task.")
+            if not shutdown_task.done():
+                shutdown_task.cancel()
+            # Also cancel any pending student disconnect shutdown if the student reconnected
+            if 'student_disconnect_task' in locals():
+                nonlocal student_disconnect_task
+                if (participant.identity == rox_agent_instance.caller_identity and
+                    student_disconnect_task and not student_disconnect_task.done()):
+                    student_disconnect_task.cancel()
+        except Exception:
+            logger.debug("no-show cancel handler error", exc_info=True)
 
-    def on_participant_connected(participant: rtc.RemoteParticipant):
-        asyncio.create_task(_on_participant_connected(participant))
-
-    ctx.room.on("participant_connected", on_participant_connected)
+    ctx.room.on("participant_connected", _cancel_no_show_on_connect)
 
     # --- NEW: Read metadata from the token and populate agent state ---
     try:
@@ -1310,6 +1436,63 @@ async def entrypoint(ctx: JobContext):
         # turn_detection=MultilingualModel(),
     )
     rox_agent_instance.agent_session = main_agent_session
+    # Store the LiveKit room reference for downstream clients (browser/frontend)
+    try:
+        rox_agent_instance._room = ctx.room
+        # Expose session_id for identity composition if needed
+        rox_agent_instance.session_id = getattr(ctx.room, "name", None)
+    except Exception:
+        logger.debug("Unable to cache room/session on agent instance", exc_info=True)
+
+    # Trigger the initial browser navigate only when room has 3 participants (agent + user + browser)
+    try:
+        browser_identity = None
+        if getattr(ctx, "room", None) and getattr(ctx.room, "name", None):
+            browser_identity = f"browser-bot-{ctx.room.name}"
+
+        # Helper: send initial navigate only when remote participants >= 2 and browser is present
+        async def _maybe_send_initial_nav_if_three():
+            try:
+                if rox_agent_instance._initial_nav_sent:
+                    return
+                rp = getattr(ctx.room, "remote_participants", {})
+                if not isinstance(rp, dict):
+                    return
+                # Need at least user + browser (two remotes)
+                if browser_identity and browser_identity in rp and len(rp) >= 2:
+                    await rox_agent_instance._browser_pod_client.send_browser_command(
+                        ctx.room,
+                        browser_identity,
+                        "browser_navigate",
+                        {"url": "https://www.example.com"},
+                    )
+                    rox_agent_instance._initial_nav_sent = True
+                    logger.info(f"[AUTO] Sent initial navigate to example.com (3 participants detected)")
+            except Exception as e:
+                logger.error(f"[AUTO] Failed to send initial navigate (3 participants rule): {e}")
+
+        if browser_identity and not rox_agent_instance._browser_join_cb_registered:
+            def _browser_join_cb(p):
+                try:
+                    pid = getattr(p, "identity", "")
+                    # On any participant connect, re-check the 3-participant rule
+                    if not rox_agent_instance._initial_nav_sent:
+                        asyncio.create_task(_maybe_send_initial_nav_if_three())
+                except Exception:
+                    logger.debug("[AUTO][event] participant_connected handler error", exc_info=True)
+
+            ctx.room.on("participant_connected", _browser_join_cb)
+            rox_agent_instance._browser_join_cb_registered = True
+
+            # If browser already present by the time we register, send immediately once
+            try:
+                rp = getattr(ctx.room, "remote_participants", {})
+                if isinstance(rp, dict) and not rox_agent_instance._initial_nav_sent:
+                    asyncio.create_task(_maybe_send_initial_nav_if_three())
+            except Exception:
+                logger.debug("[AUTO] immediate send check failed", exc_info=True)
+    except Exception:
+        logger.debug("[AUTO] failed to register browser join hook", exc_info=True)
 
     # Enhanced user state handler for VAD-based automatic mic turn-off
     def _handle_user_state_change(ev):
@@ -1516,6 +1699,124 @@ def run_agent(agent_request: AgentRequest):
         return {"message": f"Agent started for room {room_name}", "pid": process.pid}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to run agent: {str(e)}")
+
+
+class BrowserCommandRequest(BaseModel):
+    room_name: str
+    tool_name: str
+    parameters: Optional[Dict[str, Any]] = None
+    room_url: Optional[str] = None
+    token: Optional[str] = None
+    participant_identity: Optional[str] = None
+
+
+@app.post("/dev/send-browser-command")
+async def dev_send_browser_command(req: BrowserCommandRequest):
+    """Dev-only: send a single browser command to the session-bubble via LiveKit.
+
+    Body: {
+      room_name: string,
+      tool_name: string,            # e.g., 'browser_navigate', 'browser_click'
+      parameters?: object,          # e.g., { url: 'https://example.com' }
+      room_url?: string,            # LiveKit WS URL (optional)
+      token?: string,               # LiveKit access token (optional)
+      participant_identity?: string # publish identity (optional)
+    }
+    """
+    try:
+        room_name = req.room_name
+        tool_name = req.tool_name
+        params = req.parameters or {}
+
+        # Resolve LiveKit URL and token
+        ws_url = req.room_url or os.getenv("LIVEKIT_URL")
+        token = req.token
+
+        # Use a dedicated agent identity to avoid kicking the viewer (student identity)
+        agent_identity = req.participant_identity or f"cmd-relay-{room_name}"
+
+        if not token:
+            api_key = os.getenv("LIVEKIT_API_KEY")
+            api_secret = os.getenv("LIVEKIT_API_SECRET")
+            if not (api_key and api_secret):
+                raise HTTPException(status_code=500, detail="LIVEKIT_API_KEY/SECRET not set; cannot mint agent token. Pass 'token' explicitly to avoid using the student's token.")
+            try:
+                # Mint a short-lived token for this dedicated identity
+                from livekit.api import AccessToken, VideoGrants
+                grants = VideoGrants(room_join=True, room=room_name, can_publish_data=True)
+                token = AccessToken(api_key, api_secret).with_identity(agent_identity).with_name(agent_identity).with_grants(grants).to_jwt()
+            except Exception as e:
+                logger.error(f"Failed to mint agent token: {e}")
+                raise HTTPException(status_code=500, detail="Failed to mint agent token")
+
+        if not ws_url:
+            raise HTTPException(status_code=500, detail="Could not resolve LiveKit wsUrl. Set LIVEKIT_URL or pass room_url.")
+
+        # Connect, publish command, disconnect
+        room = rtc.Room()
+        await room.connect(ws_url, token)
+        try:
+            browser_identity = f"browser-bot-{room_name}"
+            client = BrowserPodClient()
+            ok = await client.send_browser_command(room, browser_identity, tool_name, params)
+            await asyncio.sleep(0.4)
+            return {"ok": bool(ok), "room": room.name, "tool": tool_name, "parameters": params}
+        finally:
+            try:
+                await room.disconnect()
+            except Exception:
+                pass
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"/dev/send-browser-command failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Compatibility: expose /local-spawn-agent on this server ---
+class AgentSpawnRequest(BaseModel):
+    room_name: str
+    ws_url: str
+    api_key: str
+    api_secret: str
+    agent_identity: str
+    student_token_metadata: str
+
+async def _run_worker_from_payload(payload: AgentSpawnRequest):
+    """Spawn a LiveKit agent worker using the provided payload."""
+    try:
+        # Mirror local_test_server.py behavior
+        os.environ["LIVEKIT_URL"] = payload.ws_url
+        os.environ["LIVEKIT_API_KEY"] = payload.api_key
+        os.environ["LIVEKIT_API_SECRET"] = payload.api_secret
+        os.environ["LIVEKIT_ROOM_NAME"] = payload.room_name
+        os.environ["STUDENT_TOKEN_METADATA"] = payload.student_token_metadata
+
+        # Create and run the worker
+        worker_options = agents.WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            ws_url=payload.ws_url,
+            api_key=payload.api_key,
+            api_secret=payload.api_secret,
+        )
+        worker = agents.Worker(worker_options)
+        await worker.run()
+    except Exception as e:
+        logger.error(f"[local-spawn-agent] Worker failed: {e}", exc_info=True)
+
+@app.post("/local-spawn-agent")
+async def local_spawn_agent(request: AgentSpawnRequest):
+    """Dev worker endpoint used by webrtc-token-service in development.
+
+    Accepts the same payload as livekit-service/local_test_server.py and starts the
+    LiveKit agent worker in the background.
+    """
+    try:
+        # Schedule the worker to run asynchronously and return immediately
+        asyncio.create_task(_run_worker_from_payload(request))
+        return {"status": "accepted", "message": f"Agent spawn scheduled for room {request.room_name}"}
+    except Exception as e:
+        logger.error(f"/local-spawn-agent failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 def run_fastapi_server():
     """Run the FastAPI server"""
