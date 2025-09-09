@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livekit-service
+  labels:
+    app: livekit-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: livekit-service
+  template:
+    metadata:
+      labels:
+        app: livekit-service
+    spec:
+      containers:
+      - name: livekit-service
+        image: ghcr.io/your-org/livekit-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8001
+        env:
+        - name: LIVEKIT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: livekit-secrets
+              key: LIVEKIT_API_KEY
+        - name: LIVEKIT_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: livekit-secrets
+              key: LIVEKIT_API_SECRET
+        - name: LIVEKIT_URL
+          valueFrom:
+            secretKeyRef:
+              name: livekit-secrets
+              key: LIVEKIT_URL
+        - name: LANGGRAPH_TUTOR_URL
+          value: "http://kamikaze:8001"
+        # Wire the browser pod HTTP URL for on-demand screenshots
+        - name: BROWSER_POD_HTTP_URL
+          value: "http://session-bubble:8777"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          periodSeconds: 10
+          failureThreshold: 6
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"

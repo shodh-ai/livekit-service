@@ -14,59 +14,72 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger(__name__)
 
 class LangGraphClient:
-    def __init__(self):
+    def __init__(self, agent=None):
         # The URL should point to your new Student Tutor agent's base
 
         # Support both LANGGRAPH_TUTOR_URL and legacy LANGGRAPH_API_URL
         self.base_url = os.getenv("LANGGRAPH_TUTOR_URL") or os.getenv("LANGGRAPH_API_URL", "http://localhost:8001")
         self.timeout = aiohttp.ClientTimeout(total=120.0)
         self.vnc_http_url = os.getenv("VNC_LISTENER_HTTP_URL")  # e.g., http://localhost:8766
+        # New: direct HTTP server on browser pod for on-demand screenshots
+        self.browser_pod_http_url = os.getenv("BROWSER_POD_HTTP_URL")  # e.g., http://browser-pod:8777
+        # Store reference to the RoxAgent to access rrweb_events_buffer
+        self.agent = agent
         # Initialization logs for diagnostics
         logger.info(f"LangGraphClient base_url={self.base_url}")
-        if self.vnc_http_url:
+        if self.browser_pod_http_url:
+            logger.info(f"LangGraphClient BROWSER_POD_HTTP_URL set: {self.browser_pod_http_url}")
+        elif self.vnc_http_url:
             logger.info(f"LangGraphClient VNC_LISTENER_HTTP_URL set: {self.vnc_http_url}")
         else:
-            logger.info("LangGraphClient VNC_LISTENER_HTTP_URL not set; visual_context will be omitted.")
+            logger.info("LangGraphClient: No browser HTTP source configured; visual_context may be omitted.")
 
     async def _fetch_visual_context(self, session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
-        """Optionally fetch a screenshot from the VNC listener HTTP endpoint.
+        """Optionally fetch a screenshot from the browser pod HTTP endpoint; fallback to VNC listener.
 
         Returns None if not configured or on failure.
         """
-        if not self.vnc_http_url:
-            logger.debug("VNC_LISTENER_HTTP_URL not configured; skipping visual context fetch.")
+        url = None
+        source = None
+        if self.browser_pod_http_url:
+            url = self.browser_pod_http_url.rstrip('/') + "/screenshot"
+            source = "browser_pod"
+        elif self.vnc_http_url:
+            url = self.vnc_http_url.rstrip('/') + "/screenshot"
+            source = "vnc_listener"
+        else:
+            logger.debug("No browser HTTP URL configured; skipping visual context fetch.")
             return None
-        url = self.vnc_http_url.rstrip('/') + "/screenshot"
         try:
-            logger.debug(f"Fetching VNC visual context from: {url}")
+            logger.debug(f"Fetching visual context from: {url}")
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    logger.warning(f"VNC screenshot fetch non-200: {resp.status}")
+                    logger.warning(f"/screenshot fetch non-200: {resp.status}")
                     return None
                 data = await resp.json()
-                logger.debug(f"VNC /screenshot response keys: {list(data.keys())}")
+                logger.debug(f"/screenshot response keys: {list(data.keys())}")
                 success = data.get("success")
                 if success is False:
-                    logger.warning("VNC /screenshot returned success=false; skipping visual context.")
+                    logger.warning("/screenshot returned success=false; skipping visual context.")
                     return None
                 b64 = data.get("screenshot_b64")
                 if not b64:
-                    logger.info("VNC /screenshot returned no screenshot_b64; skipping visual context.")
+                    logger.info("/screenshot returned no screenshot_b64; skipping visual context.")
                     return None
                 b64_len = len(b64)
                 b64_preview = b64[:60]
                 if success is None:
-                    logger.info(f"Fetched VNC screenshot (no 'success' flag present) len={b64_len} preview={b64_preview}...")
+                    logger.info(f"Fetched screenshot (no 'success' flag present) len={b64_len} preview={b64_preview}...")
                 else:
-                    logger.info(f"Fetched VNC screenshot_b64 len={b64_len} preview={b64_preview}...")
+                    logger.info(f"Fetched screenshot_b64 len={b64_len} preview={b64_preview}...")
                 return {
-                    "source": "vnc_listener",
+                    "source": source or "browser_pod",
                     "screenshot_b64": b64,
                     "page_url": data.get("url"),
                     "captured_at": data.get("timestamp"),
                 }
         except Exception as e:
-            logger.warning(f"Failed to fetch VNC visual context: {e}")
+            logger.warning(f"Failed to fetch visual context: {e}")
             return None
 
 
@@ -153,6 +166,34 @@ class LangGraphClient:
                 except Exception:
                     # Fallback to repr if JSON serialization fails
                     logger.info(f"LangGraphClient POST {full_url} body(repr): {request_body!r}")
+
+                # Attach buffered rrweb events if available (imprinter mode)
+                try:
+                    if getattr(self, "agent", None) is not None:
+                        events = getattr(self.agent, "rrweb_events_buffer", None)
+                        if isinstance(events, list) and len(events) > 0:
+                            logger.info(f"Attaching {len(events)} rrweb events to LangGraph request.")
+                            request_body["rrweb_events"] = list(events)
+                            # Clear buffer after attaching
+                            events.clear()
+                except Exception:
+                    logger.debug("Failed to attach rrweb_events to request body", exc_info=True)
+
+                # Attach live monitoring events for Kamikaze if present
+                try:
+                    if getattr(self, "agent", None) is not None:
+                        live_events = getattr(self.agent, "live_events_buffer", None)
+                        if isinstance(live_events, list) and len(live_events) > 0:
+                            rr = [e.get("event_payload") for e in live_events if e.get("source") == "rrweb" and e.get("event_payload") is not None]
+                            vc = [e.get("event_payload") for e in live_events if e.get("source") == "vscode" and e.get("event_payload") is not None]
+                            if rr:
+                                request_body["raw_rrweb_events"] = rr
+                            if vc:
+                                request_body["raw_vscode_events"] = vc
+                            logger.info(f"Attached live events: rrweb={len(rr)} vscode={len(vc)}")
+                            live_events.clear()
+                except Exception:
+                    logger.debug("Failed to attach live events to request body", exc_info=True)
 
                 async with session.post(full_url, json=request_body) as response:
                     response.raise_for_status()

@@ -252,8 +252,12 @@ class RoxAgent(Agent):
         self.llm_interceptor = self.TranscriptInterceptor(self)
         
         # --- Communication Clients ---
-        # LangGraph client for brain communication
-        self._langgraph_client = LangGraphClient()
+        # Buffer for rrweb events captured over the LiveKit data channel
+        self.rrweb_events_buffer: List[Dict[str, Any]] = []
+        # Buffer for live monitoring events (rrweb or vscode) used by Kamikaze
+        self.live_events_buffer: List[Dict[str, Any]] = []
+        # LangGraph client for brain communication (pass self for rrweb buffer access)
+        self._langgraph_client = LangGraphClient(self)
         # Frontend client enabled for visual actions
         self._frontend_client = FrontendClient()
         # Browser pod client for LiveKit data-channel control
@@ -1311,6 +1315,29 @@ async def entrypoint(ctx: JobContext):
     ctx.rox_agent = rox_agent_instance  # Make agent findable by RPC service
     rox_agent_instance._room = ctx.room
     rox_agent_instance.session_id = ctx.room.name
+
+    # Listen for data-channel events and buffer them (imprinting and live monitoring)
+    @ctx.room.on("data_received")
+    def _on_data_received(data_packet: rtc.DataPacket):
+        try:
+            payload_bytes = data_packet.data
+            payload_str = payload_bytes.decode("utf-8") if isinstance(payload_bytes, (bytes, bytearray)) else str(payload_bytes)
+            payload = json.loads(payload_str)
+            if isinstance(payload, dict):
+                # Imprinter recording packets from browser pod (event key)
+                if payload.get("source") == "rrweb" and "event" in payload:
+                    rox_agent_instance.rrweb_events_buffer.append(payload["event"])  # type: ignore[arg-type]
+                    logger.info(f"[rrweb] Buffered imprint event. Buffer size={len(rox_agent_instance.rrweb_events_buffer)}")
+                # Live monitoring packets from browser pod (event_payload key)
+                elif payload.get("source") in ("rrweb", "vscode") and "event_payload" in payload:
+                    rox_agent_instance.live_events_buffer.append(payload)
+                    if len(rox_agent_instance.live_events_buffer) % 50 == 0:
+                        logger.info(f"[live] Buffered {len(rox_agent_instance.live_events_buffer)} live events so far")
+                else:
+                    # Other data packets may be added in the future; ignore here
+                    logger.debug(f"[data_received] Non-handled packet: keys={list(payload.keys())}")
+        except Exception as e:
+            logger.warning(f"[data_received] Failed to process packet: {e}")
 
     # --- Participant disconnect handling: delayed shutdown with grace window ---
     student_disconnect_grace = float(os.getenv("STUDENT_DISCONNECT_GRACE_SEC", "12"))
