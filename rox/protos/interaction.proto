@@ -266,6 +266,8 @@ enum ClientUIActionType {
   HIGHLIGHT_CELL_FOR_DOUBT_RESOLUTION = 63;
   // Jupyter environment setup
   SETUP_JUPYTER = 72;                   // Setup Jupyter environment (navigate, activate Pyodide, upload files)
+  // rrweb replay action
+  RRWEB_REPLAY = 73;                    // Trigger rrweb replay on the frontend using events JSON URL
 
   EXCALIDRAW_CLEAR_CANVAS = 64;         // Clear all elements from Excalidraw canvas
   EXCALIDRAW_UPDATE_ELEMENTS = 74;      // Update existing elements on canvas (moved to avoid collision)

@@ -1243,6 +1243,22 @@ class RoxAgent(Agent):
                             "Frontend client not available - would capture canvas screenshot"
                         )
 
+                elif tool_name == "trigger_rrweb_replay":
+                    # Trigger rrweb replay on the frontend given a JSON events URL
+                    events_url = parameters.get("events_url")
+                    if self._frontend_client and events_url:
+                        logger.info(f"Triggering rrweb replay for URL: {events_url}")
+                        try:
+                            await self._frontend_client.trigger_rrweb_replay(
+                                self._room, self.caller_identity, events_url=events_url
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to trigger rrweb replay: {e}")
+                    else:
+                        logger.warning(
+                            "Frontend client not available or no events_url provided for rrweb replay."
+                        )
+
                 elif tool_name == "get_canvas_elements":
                     # Get list of all elements currently on canvas
                     if self._frontend_client:

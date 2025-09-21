@@ -165,6 +165,14 @@ class FrontendClient:
         response = await self._send_rpc(room, identity, "SUGGESTED_RESPONSES", params)
         return response is not None and response.success
 
+    async def trigger_rrweb_replay(self, room: rtc.Room, identity: str, events_url: str) -> bool:
+        """
+        Send an RPC command to the frontend to start an rrweb replay from a URL.
+        """
+        params = {"events_url": events_url}
+        response = await self._send_rpc(room, identity, "RRWEB_REPLAY", params)
+        return response is not None and response.success
+
     async def highlight_element(self, room: rtc.Room, identity: str, element_id: str) -> bool:
         """
         Highlight a specific element on the frontend using HIGHLIGHT_TEXT_RANGES action.
