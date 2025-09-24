@@ -8,7 +8,9 @@ Handles task invocation and response parsing.
 import logging
 import json
 import os
+import asyncio
 import aiohttp
+import random
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -18,15 +20,40 @@ class LangGraphClient:
         # The URL should point to your new Student Tutor agent's base
 
         # Support both LANGGRAPH_TUTOR_URL and legacy LANGGRAPH_API_URL
-        self.base_url = os.getenv("LANGGRAPH_TUTOR_URL") or os.getenv("LANGGRAPH_API_URL", "http://localhost:8001")
-        self.timeout = aiohttp.ClientTimeout(total=120.0)
+        self.base_url = (
+            os.getenv("LANGGRAPH_TUTOR_URL")
+            or os.getenv("LANGGRAPH_API_URL")
+            or os.getenv("MY_CUSTOM_AGENT_URL")
+            or "http://localhost:8001"
+        )
+
+        # Configurable HTTP timeouts
+        total_timeout = float(os.getenv("LANGGRAPH_TOTAL_TIMEOUT", "120"))
+        connect_timeout = float(os.getenv("LANGGRAPH_CONNECT_TIMEOUT", "10"))
+        sock_connect_timeout = float(
+            os.getenv("LANGGRAPH_SOCK_CONNECT_TIMEOUT", str(connect_timeout))
+        )
+        sock_read_timeout = float(os.getenv("LANGGRAPH_READ_TIMEOUT", "110"))
+
+        self.timeout = aiohttp.ClientTimeout(
+            total=total_timeout,
+            connect=connect_timeout,
+            sock_connect=sock_connect_timeout,
+            sock_read=sock_read_timeout,
+        )
+
+        # Retry configuration
+        self.max_retries = int(os.getenv("LANGGRAPH_MAX_RETRIES", "3"))
+        self.backoff_base = float(os.getenv("LANGGRAPH_BACKOFF_BASE", "1.5"))
         self.vnc_http_url = os.getenv("VNC_LISTENER_HTTP_URL")  # e.g., http://localhost:8766
         # New: direct HTTP server on browser pod for on-demand screenshots
         self.browser_pod_http_url = os.getenv("BROWSER_POD_HTTP_URL")  # e.g., http://browser-pod:8777
         # Store reference to the RoxAgent to access rrweb_events_buffer
         self.agent = agent
         # Initialization logs for diagnostics
-        logger.info(f"LangGraphClient base_url={self.base_url}")
+        logger.info(
+            f"LangGraphClient base_url={self.base_url} (timeout total={total_timeout}s, connect={connect_timeout}s, sock_connect={sock_connect_timeout}s, sock_read={sock_read_timeout}s, retries={self.max_retries})"
+        )
         if self.browser_pod_http_url:
             logger.info(f"LangGraphClient BROWSER_POD_HTTP_URL set: {self.browser_pod_http_url}")
         elif self.vnc_http_url:
@@ -195,33 +222,85 @@ class LangGraphClient:
                 except Exception:
                     logger.debug("Failed to attach live events to request body", exc_info=True)
 
-                async with session.post(full_url, json=request_body) as response:
-                    response.raise_for_status()
-                    logger.info(f"LangGraphClient response status: {response.status}")
-
-                    # Try to parse JSON, otherwise capture text
+                # POST with retry logic on timeouts and transient errors
+                last_error: Optional[Exception] = None
+                for attempt in range(1, self.max_retries + 1):
                     try:
-                        response_data = await response.json()
-                        logger.info(f"LangGraphClient response JSON: {json.dumps(response_data, ensure_ascii=False)}")
-                    except Exception:
-                        response_text = await response.text()
-                        logger.info(f"LangGraphClient response text: {response_text}")
-                        # If not JSON, we can't proceed as expected
-                        return None
-                    
-                    # The actual LangGraph service returns {"delivery_plan": delivery_plan}
-                    # We need to wrap it in the format the main agent loop expects
-                    if response_data and "delivery_plan" in response_data:
-                        logger.info(f"Received response from LangGraph service: delivery_plan with {len(response_data['delivery_plan'].get('actions', []))} actions")
-                        
-                        # Return in the format expected by main.py
-                        return {
-                            "delivery_plan": response_data["delivery_plan"],
-                            "current_lo_id": task.get("current_lo_id")  # Preserve current_lo_id
-                        }
-                    else:
-                        logger.warning("No delivery_plan received from LangGraph service")
-                        return None
+                        logger.info(
+                            f"POST attempt {attempt}/{self.max_retries} -> {full_url}"
+                        )
+                        async with session.post(full_url, json=request_body) as response:
+                            response.raise_for_status()
+                            logger.info(
+                                f"LangGraphClient response status: {response.status}"
+                            )
+
+                            # Try to parse JSON, otherwise capture text
+                            try:
+                                response_data = await response.json()
+                                logger.info(
+                                    f"LangGraphClient response JSON: {json.dumps(response_data, ensure_ascii=False)}"
+                                )
+                            except Exception:
+                                response_text = await response.text()
+                                logger.info(
+                                    f"LangGraphClient response text (non-JSON): {response_text}"
+                                )
+                                # If not JSON, we can't proceed as expected
+                                return None
+
+                            # The actual LangGraph service returns {"delivery_plan": delivery_plan}
+                            # We need to wrap it in the format the main agent loop expects
+                            if response_data and "delivery_plan" in response_data:
+                                logger.info(
+                                    f"Received response from LangGraph service: delivery_plan with {len(response_data['delivery_plan'].get('actions', []))} actions"
+                                )
+
+                                # Return in the format expected by main.py
+                                return {
+                                    "delivery_plan": response_data["delivery_plan"],
+                                    "current_lo_id": task.get("current_lo_id"),  # Preserve current_lo_id
+                                }
+                            else:
+                                logger.warning(
+                                    "No delivery_plan received from LangGraph service"
+                                )
+                                return None
+                    except asyncio.TimeoutError as e:
+                        last_error = e
+                        if attempt < self.max_retries:
+                            delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
+                            logger.warning(
+                                f"Timeout on attempt {attempt}/{self.max_retries}. Retrying in {delay:.2f}s..."
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error(
+                                f"All retries exhausted due to timeout: {e}",
+                            )
+                            break
+                    except aiohttp.ClientError as e:
+                        last_error = e
+                        # For transient network errors, also retry
+                        if attempt < self.max_retries:
+                            delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
+                            logger.warning(
+                                f"HTTP client error on attempt {attempt}/{self.max_retries}: {e}. Retrying in {delay:.2f}s..."
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error(
+                                f"All retries exhausted due to HTTP error: {e}",
+                            )
+                            break
+
+                if last_error:
+                    logger.error(
+                        f"Failed to communicate with LangGraph after {self.max_retries} attempts: {last_error}"
+                    )
+                return None
                         
         except aiohttp.ClientError as e:
             logger.error(f"HTTP error communicating with LangGraph: {e}")

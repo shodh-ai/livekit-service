@@ -13,18 +13,18 @@ livekit-protocol==1.0.2
 livekit-agents[deepgram,silero]~=1.0
 
 # Essential utilities
-aiohttp==3.11.18
+aiohttp
 grpcio
 grpcio-tools
-click==8.1.8
+click
 asyncio
 livekit.plugins.turn_detector 
 # Pydantic for data validation
-pydantic==2.10.5
+pydantic
 
 # Basic LangChain for AI functionality (minimal set)
-langchain-core==0.3.60
-langchain==0.3.25
+langchain-core
+langchain
 
 # Protobuf for RPC communication
-protobuf>=5.0.0
+protobuf
