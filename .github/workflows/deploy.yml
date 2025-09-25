@@ -3,10 +3,10 @@ name: Deploy to Cloud Run Job
 on:
   push:
     branches:
-      - haha
+      - main
   pull_request:
     branches:
-      - haha
+      - main
 
 env:
   PROJECT_ID: first-cedar-470107-j2
