@@ -725,6 +725,7 @@ class RoxAgent(Agent):
                     "vscode_run_terminal_command",
                     "vscode_highlight_add",
                     "vscode_highlight_remove",
+                    "vscode_create_file", # Create a file in the vscode workspace
                 ]:
                     # Send commands to the browser pod over LiveKit data channel
                     browser_pod_identity = (
