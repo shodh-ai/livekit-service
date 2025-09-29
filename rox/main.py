@@ -702,6 +702,18 @@ class RoxAgent(Agent):
                             "No text to speak or agent_session not available"
                         )
 
+                elif tool_name == "wait":
+                    # Pause execution for a specified number of milliseconds
+                    ms = parameters.get("ms") or parameters.get("milliseconds") or 0
+                    try:
+                        ms_val = float(ms)
+                    except Exception:
+                        ms_val = 0.0
+                    # Clamp to a sane maximum (10 minutes)
+                    ms_val = max(0.0, min(ms_val, 600000.0))
+                    logger.info(f"[WAIT] Sleeping for {ms_val} ms before next action...")
+                    await asyncio.sleep(ms_val / 1000.0)
+
                 elif tool_name == "draw":
                     # Execute drawing on the frontend
                     if self._frontend_client:
@@ -931,6 +943,94 @@ class RoxAgent(Agent):
                     else:
                         logger.warning(
                             f"Frontend client not available - would forward display_visual_aid: {parameters}"
+                        )
+
+                # --- Feed/Whiteboard Block Management ---
+                elif tool_name == "add_excalidraw_block":
+                    # Normalize parameters for frontend expectations
+                    raw = parameters or {}
+                    out_params = {}
+                    # id
+                    if raw.get("id"):
+                        out_params["id"] = raw.get("id")
+                    elif raw.get("block_id"):
+                        out_params["id"] = raw.get("block_id")
+                    # summary/title
+                    if raw.get("summary") is not None:
+                        out_params["summary"] = raw.get("summary")
+                    elif raw.get("title") is not None:
+                        out_params["summary"] = raw.get("title")
+                    # elements list or JSON string
+                    elements = raw.get("elements")
+                    if elements is None:
+                        elements = raw.get("initial_elements")
+                    if elements is not None:
+                        out_params["elements"] = elements
+                    if self._frontend_client and self._room and self.caller_identity:
+                        try:
+                            ok = await self._frontend_client.execute_visual_action(
+                                self._room, self.caller_identity, "add_excalidraw_block", out_params
+                            )
+                            if ok:
+                                logger.info("[ADD_BLOCK] Forwarded add_excalidraw_block to frontend")
+                            else:
+                                logger.error("[ADD_BLOCK] Frontend RPC returned failure for ADD_EXCALIDRAW_BLOCK")
+                        except Exception as e:
+                            logger.error(f"[ADD_BLOCK] Failed to forward add_excalidraw_block: {e}", exc_info=True)
+                    else:
+                        logger.warning(
+                            f"Frontend client not available - would add_excalidraw_block: {out_params}"
+                        )
+
+                elif tool_name == "update_excalidraw_block":
+                    raw = parameters or {}
+                    out_params = {}
+                    # id / block_id
+                    bid = raw.get("id") or raw.get("block_id") or raw.get("blockId")
+                    if bid:
+                        out_params["id"] = bid
+                    # elements: prefer 'elements', else fall back to 'modifications' from mock brain
+                    elems = raw.get("elements")
+                    if elems is None:
+                        elems = raw.get("modifications")
+                    if elems is not None:
+                        out_params["elements"] = elems
+                    if self._frontend_client and self._room and self.caller_identity:
+                        try:
+                            ok = await self._frontend_client.execute_visual_action(
+                                self._room, self.caller_identity, "update_excalidraw_block", out_params
+                            )
+                            if ok:
+                                logger.info("[UPDATE_BLOCK] Forwarded update_excalidraw_block to frontend")
+                            else:
+                                logger.error("[UPDATE_BLOCK] Frontend RPC returned failure for UPDATE_EXCALIDRAW_BLOCK")
+                        except Exception as e:
+                            logger.error(f"[UPDATE_BLOCK] Failed to forward update_excalidraw_block: {e}", exc_info=True)
+                    else:
+                        logger.warning(
+                            f"Frontend client not available - would update_excalidraw_block: {out_params}"
+                        )
+
+                elif tool_name == "focus_on_block":
+                    raw = parameters or {}
+                    out_params = {}
+                    bid = raw.get("id") or raw.get("block_id") or raw.get("blockId")
+                    if bid:
+                        out_params["id"] = bid
+                    if self._frontend_client and self._room and self.caller_identity:
+                        try:
+                            ok = await self._frontend_client.execute_visual_action(
+                                self._room, self.caller_identity, "focus_on_block", out_params
+                            )
+                            if ok:
+                                logger.info("[FOCUS_BLOCK] Forwarded focus_on_block to frontend")
+                            else:
+                                logger.error("[FOCUS_BLOCK] Frontend RPC returned failure for FOCUS_ON_BLOCK")
+                        except Exception as e:
+                            logger.error(f"[FOCUS_BLOCK] Failed to forward focus_on_block: {e}", exc_info=True)
+                    else:
+                        logger.warning(
+                            f"Frontend client not available - would focus_on_block: {out_params}"
                         )
 
                 elif tool_name == "highlight_elements":
@@ -1257,6 +1357,43 @@ class RoxAgent(Agent):
                     else:
                         logger.warning(
                             "Frontend client not available or no events_url provided for rrweb replay."
+                        )
+
+                elif tool_name == "get_block_content":
+                    # Request content of a whiteboard feed block from the frontend and feed back to LangGraph
+                    block_id = str(parameters.get("block_id") or parameters.get("id") or "").strip()
+                    if not block_id:
+                        logger.warning("[get_block_content] Missing block_id parameter; skipping")
+                        continue
+                    if self._frontend_client and self._room and self.caller_identity:
+                        try:
+                            logger.info(f"[get_block_content] Sending RPC to frontend to fetch block content for ID: {block_id}")
+                            content = await self._frontend_client.get_block_content_from_frontend(
+                                self._room, self.caller_identity, block_id
+                            )
+                            if content is None:
+                                logger.error(f"[get_block_content] Frontend did not return content for ID: {block_id}")
+                                continue
+                            logger.info(f"[get_block_content] Received block content from frontend for ID: {block_id}")
+                            # Enqueue a follow-up task for the Brain with the content
+                            followup_task = {
+                                "task_name": "handle_response",
+                                "caller_identity": self.caller_identity,
+                                "interaction_type": "block_content",
+                                "block_id": block_id,
+                                "block_content": content,
+                                # Provide a small transcript marker for logging on the Brain side
+                                "transcript": f"[block_content:{block_id}]",
+                            }
+                            await self._processing_queue.put(followup_task)
+                            logger.info(
+                                f"[get_block_content] Queued follow-up task with block_id={block_id} for Brain processing"
+                            )
+                        except Exception as e:
+                            logger.error(f"[get_block_content] Error while requesting block content: {e}", exc_info=True)
+                    else:
+                        logger.warning(
+                            "[get_block_content] Frontend client, room, or caller_identity not available; cannot fetch content"
                         )
 
                 elif tool_name == "get_canvas_elements":

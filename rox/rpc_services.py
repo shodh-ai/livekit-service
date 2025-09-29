@@ -109,6 +109,17 @@ class AgentInteractionService:
                 "json_payload": json_payload,
                 "caller_identity": getattr(raw_payload, 'caller_identity', None),
             }
+
+            # Parse JSON payload to extract restored_feed_summary if present
+            try:
+                payload_dict = json.loads(json_payload) if json_payload else {}
+            except Exception:
+                payload_dict = {}
+            if isinstance(payload_dict, dict) and "restored_feed_summary" in payload_dict:
+                task["restored_feed_summary"] = payload_dict.get("restored_feed_summary")
+                logger.info("[RPC] InvokeAgentTask contains restored_feed_summary: Yes")
+            else:
+                logger.info("[RPC] InvokeAgentTask contains restored_feed_summary: No")
             await self.agent._processing_queue.put(task)
             logger.info(f"Queued InvokeAgentTask: {task_name}")
 
