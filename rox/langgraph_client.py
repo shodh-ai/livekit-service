@@ -134,6 +134,20 @@ class LangGraphClient:
             "current_lo_id": task.get("current_lo_id", None)
         }
 
+        # Pass-through enriched context from frontend/session if provided
+        try:
+            if task.get("restored_feed_summary") is not None:
+                request_body["restored_feed_summary"] = task.get("restored_feed_summary")
+        except Exception:
+            pass
+        try:
+            if task.get("block_content") is not None:
+                request_body["block_content"] = task.get("block_content")
+            if task.get("block_id") is not None:
+                request_body["block_id"] = task.get("block_id")
+        except Exception:
+            pass
+
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 # Route to appropriate endpoint based on task type

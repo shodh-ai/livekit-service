@@ -21,7 +21,7 @@ class FrontendClient:
     def __init__(self):
         self.rpc_method_name = "rox.interaction.ClientSideUI/PerformUIAction"
 
-    async def _send_rpc(self, room: rtc.Room, identity: str, action_type: str, parameters: Dict[str, Any]) -> Optional[interaction_pb2.ClientUIActionResponse]:
+    async def _send_rpc(self, room: rtc.Room, identity: str, action_type: str, parameters: Dict[str, Any], timeout_sec: Optional[float] = None) -> Optional[interaction_pb2.ClientUIActionResponse]:
         """
         Send an RPC call to the frontend client.
         
@@ -54,11 +54,18 @@ class FrontendClient:
             base64_encoded_payload = base64.b64encode(payload_bytes).decode("utf-8")
 
             # Send the RPC
-            response_payload_str = await room.local_participant.perform_rpc(
-                destination_identity=identity,
-                method=self.rpc_method_name,
-                payload=base64_encoded_payload,
-            )
+            async def _do_rpc():
+                return await room.local_participant.perform_rpc(
+                    destination_identity=identity,
+                    method=self.rpc_method_name,
+                    payload=base64_encoded_payload,
+                )
+
+            if timeout_sec and timeout_sec > 0:
+                import asyncio
+                response_payload_str = await asyncio.wait_for(_do_rpc(), timeout=timeout_sec)
+            else:
+                response_payload_str = await _do_rpc()
 
             # Parse the response
             response_bytes = base64.b64decode(response_payload_str)
@@ -172,6 +179,45 @@ class FrontendClient:
         params = {"events_url": events_url}
         response = await self._send_rpc(room, identity, "RRWEB_REPLAY", params)
         return response is not None and response.success
+
+    async def get_block_content_from_frontend(self, room: rtc.Room, identity: str, block_id: str, timeout_sec: float = 15.0) -> Optional[Dict[str, Any]]:
+        """
+        Request the frontend to return the full JSON content of a whiteboard feed block.
+
+        NOTE: This relies on the frontend interpreting a generic action with parameters
+        { action: "GET_BLOCK_CONTENT", block_id } and returning a JSON string in the
+        ClientUIActionResponse.message field.
+
+        Returns the parsed dict on success, or None on failure/timeout.
+        """
+        if not block_id:
+            logger.error("get_block_content_from_frontend called without block_id")
+            return None
+        params = {
+            "action": "GET_BLOCK_CONTENT",
+            "block_id": block_id,
+        }
+        try:
+            logger.info(f"[RPC][Request] Fetching block content for id={block_id}")
+            resp = await self._send_rpc(room, identity, "SET_UI_STATE", params, timeout_sec=timeout_sec)
+            if not resp or not resp.success:
+                logger.error(f"[RPC][Response] Failed to fetch block content for id={block_id}")
+                return None
+            raw = (resp.message or "").strip()
+            if not raw:
+                logger.warning(f"[RPC][Response] Empty message for block id={block_id}")
+                return None
+            try:
+                import json
+                data = json.loads(raw)
+                logger.info(f"[RPC][Response] Received block content for id={block_id} (keys={list(data.keys())})")
+                return data
+            except Exception as pe:
+                logger.error(f"[RPC][Response] Non-JSON or invalid message for block id={block_id}: {raw[:80]}... error={pe}")
+                return None
+        except Exception as e:
+            logger.error(f"RPC error while requesting block content for id={block_id}: {e}", exc_info=True)
+            return None
 
     async def highlight_element(self, room: rtc.Room, identity: str, element_id: str) -> bool:
         """
