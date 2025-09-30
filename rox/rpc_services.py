@@ -7,6 +7,7 @@ for receiving specific, meaningful events from the Frontend Sensor.
 """
 
 import logging
+import asyncio
 import json
 import base64
 from typing import TYPE_CHECKING
@@ -15,7 +16,7 @@ from livekit.rtc.rpc import RpcInvocationData
 from generated.protos import interaction_pb2
 
 if TYPE_CHECKING:
-    from .main import RoxAgent
+    from main import RoxAgent
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +48,27 @@ class AgentInteractionService:
         logger.info("[RPC] Received student_wants_to_interrupt")
         
         try:
-            # Use the new dedicated interruption handler
+            # Immediate local acknowledgement: stop TTS and enable mic
             if self.agent:
+                try:
+                    await self.agent.optimistic_interrupt_ack("Mic enabled. You may speak now.")
+                except Exception as e:
+                    logger.warning(f"Optimistic interrupt ack failed (continuing): {e}")
+
+                # Build task for Brain processing
                 task = {
                     "task_name": "student_wants_to_interrupt",
                     "caller_identity": raw_payload.caller_identity,
                     "interrupt_type": "voice",
                     "interaction_type": "interruption"
                 }
-                # Use the new interruption handler that stops current execution and forwards immediately
-                await self.agent.handle_interruption(task)
-                logger.info("Handled voice interrupt with stop-and-forward logic")
+
+                # Schedule full interruption handling in background
+                try:
+                    asyncio.create_task(self.agent.handle_interruption(task))
+                    logger.info("Scheduled handle_interruption in background after optimistic ack (voice)")
+                except Exception as e:
+                    logger.error(f"Failed to schedule handle_interruption for voice interrupt: {e}")
 
             response_pb = interaction_pb2.AgentResponse(
                 status_message="Interrupt acknowledged. You may speak now."
@@ -88,12 +99,30 @@ class AgentInteractionService:
                 logger.error(f"Failed to decode InvokeAgentTaskRequest: {de}")
                 error_response = interaction_pb2.AgentResponse(
                     status_message=f"Invalid InvokeAgentTaskRequest: {de}",
-                    data_payload="",
                 )
                 return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
             task_name = request_pb.task_name or ""
             json_payload = request_pb.json_payload or "{}"
+
+            # NEW: Parse and normalize the JSON payload so downstream sees concrete fields
+            payload_data = {}
+            try:
+                payload_data = json.loads(json_payload) if json_payload else {}
+            except Exception as pe:
+                logger.warning(f"InvokeAgentTask payload not valid JSON: {pe}")
+                payload_data = {}
+
+            # Map selected suggestion to a transcript so it's treated like typed input
+            if task_name == "select_suggested_response":
+                text = (payload_data.get("text") or payload_data.get("value") or "").strip()
+                if text:
+                    payload_data.setdefault("transcript", text)
+                payload_data.setdefault("interaction_type", "suggested_response")
+            else:
+                # Generic fallback: if a 'text' field is present but no transcript, use it
+                if "transcript" not in payload_data and isinstance(payload_data.get("text"), str):
+                    payload_data["transcript"] = payload_data.get("text")
 
             if not self.agent:
                 logger.error("Agent not available to process InvokeAgentTask")
@@ -106,18 +135,22 @@ class AgentInteractionService:
             # Build and enqueue task for the Conductor's processing loop
             task = {
                 "task_name": task_name,
-                "json_payload": json_payload,
                 "caller_identity": getattr(raw_payload, 'caller_identity', None),
+                **payload_data,
             }
             await self.agent._processing_queue.put(task)
-            logger.info(f"Queued InvokeAgentTask: {task_name}")
+            try:
+                preview = {k: (v if k != 'transcript' else (v[:80] + '…' if isinstance(v, str) and len(v) > 80 else v)) for k, v in task.items() if k in ("task_name", "interaction_type", "transcript")}
+                logger.info(f"Queued InvokeAgentTask: {preview}")
+            except Exception:
+                logger.info(f"Queued InvokeAgentTask: {task_name}")
 
             response_pb = interaction_pb2.AgentResponse(
                 status_message=f"Task '{task_name}' enqueued",
                 data_payload="",
             )
             return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
-
+            
         except Exception as e:
             logger.error(f"Error in InvokeAgentTask: {e}", exc_info=True)
             error_response = interaction_pb2.AgentResponse(
@@ -140,17 +173,27 @@ class AgentInteractionService:
         logger.info("[RPC] Received student_mic_button_interrupt")
         
         try:
-            # Use the new dedicated interruption handler
+            # Immediate local acknowledgement: stop TTS and enable mic on UI
             if self.agent:
+                try:
+                    await self.agent.optimistic_interrupt_ack("Mic enabled. You may speak now.")
+                except Exception as e:
+                    logger.warning(f"Optimistic interrupt ack failed (continuing): {e}")
+
+                # Build task to forward to LangGraph in background
                 task = {
                     "task_name": "student_mic_button_interrupt",
                     "caller_identity": raw_payload.caller_identity,
                     "interrupt_type": "mic_button",
-                    "interaction_type": "interruption"  # This routes to /handle_interruption endpoint
+                    "interaction_type": "interruption"
                 }
-                # Use the new interruption handler that stops current execution and forwards immediately
-                await self.agent.handle_interruption(task)
-                logger.info("Handled mic button interrupt with stop-and-forward logic")
+
+                # Schedule full interruption handling without blocking the RPC response
+                try:
+                    asyncio.create_task(self.agent.handle_interruption(task))
+                    logger.info("Scheduled handle_interruption in background after optimistic ack")
+                except Exception as e:
+                    logger.error(f"Failed to schedule handle_interruption: {e}")
 
             response_pb = interaction_pb2.AgentResponse(
                 status_message="Mic interrupt acknowledged. You may speak now."
