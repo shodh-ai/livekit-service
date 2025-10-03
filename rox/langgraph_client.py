@@ -50,13 +50,16 @@ class LangGraphClient:
         self.browser_pod_http_url = os.getenv("BROWSER_POD_HTTP_URL")  # e.g., http://browser-pod:8777
         # Store reference to the RoxAgent to access rrweb_events_buffer
         self.agent = agent
+        # Controls to minimize payload size
+        self.include_visual_context = os.getenv("LANGGRAPH_INCLUDE_VISUAL_CONTEXT", "true").lower() in ("1", "true", "yes")
+        self.attach_buffers = os.getenv("LANGGRAPH_ATTACH_BUFFERS", "true").lower() in ("1", "true", "yes")
         # Initialization logs for diagnostics
         logger.info(
             f"LangGraphClient base_url={self.base_url} (timeout total={total_timeout}s, connect={connect_timeout}s, sock_connect={sock_connect_timeout}s, sock_read={sock_read_timeout}s, retries={self.max_retries})"
         )
-        if self.browser_pod_http_url:
+        if self.browser_pod_http_url and self.include_visual_context:
             logger.info(f"LangGraphClient BROWSER_POD_HTTP_URL set: {self.browser_pod_http_url}")
-        elif self.vnc_http_url:
+        elif self.vnc_http_url and self.include_visual_context:
             logger.info(f"LangGraphClient VNC_LISTENER_HTTP_URL set: {self.vnc_http_url}")
         else:
             logger.info("LangGraphClient: No browser HTTP source configured; visual_context may be omitted.")
@@ -68,6 +71,9 @@ class LangGraphClient:
         """
         url = None
         source = None
+        if not self.include_visual_context:
+            logger.debug("Visual context disabled via LANGGRAPH_INCLUDE_VISUAL_CONTEXT=false")
+            return None
         if self.browser_pod_http_url:
             url = self.browser_pod_http_url.rstrip('/') + "/screenshot"
             source = "browser_pod"
@@ -209,32 +215,44 @@ class LangGraphClient:
                     logger.info(f"LangGraphClient POST {full_url} body(repr): {request_body!r}")
 
                 # Attach buffered rrweb events if available (imprinter mode)
-                try:
-                    if getattr(self, "agent", None) is not None:
-                        events = getattr(self.agent, "rrweb_events_buffer", None)
-                        if isinstance(events, list) and len(events) > 0:
-                            logger.info(f"Attaching {len(events)} rrweb events to LangGraph request.")
-                            request_body["rrweb_events"] = list(events)
-                            # Clear buffer after attaching
-                            events.clear()
-                except Exception:
-                    logger.debug("Failed to attach rrweb_events to request body", exc_info=True)
+                if self.attach_buffers:
+                    try:
+                        if getattr(self, "agent", None) is not None:
+                            events = getattr(self.agent, "rrweb_events_buffer", None)
+                            if isinstance(events, list) and len(events) > 0:
+                                logger.info(f"Attaching {len(events)} rrweb events to LangGraph request.")
+                                request_body["rrweb_events"] = list(events)
+                                # Clear buffer after attaching
+                                events.clear()
+                    except Exception:
+                        logger.debug("Failed to attach rrweb_events to request body", exc_info=True)
 
                 # Attach live monitoring events for Kamikaze if present
+                if self.attach_buffers:
+                    try:
+                        if getattr(self, "agent", None) is not None:
+                            live_events = getattr(self.agent, "live_events_buffer", None)
+                            if isinstance(live_events, list) and len(live_events) > 0:
+                                rr = [e.get("event_payload") for e in live_events if e.get("source") == "rrweb" and e.get("event_payload") is not None]
+                                vc = [e.get("event_payload") for e in live_events if e.get("source") == "vscode" and e.get("event_payload") is not None]
+                                if rr:
+                                    request_body["raw_rrweb_events"] = rr
+                                if vc:
+                                    request_body["raw_vscode_events"] = vc
+                                logger.info(f"Attached live events: rrweb={len(rr)} vscode={len(vc)}")
+                                live_events.clear()
+                    except Exception:
+                        logger.debug("Failed to attach live events to request body", exc_info=True)
+
+                # Prepare trace headers if present
+                headers = None
                 try:
-                    if getattr(self, "agent", None) is not None:
-                        live_events = getattr(self.agent, "live_events_buffer", None)
-                        if isinstance(live_events, list) and len(live_events) > 0:
-                            rr = [e.get("event_payload") for e in live_events if e.get("source") == "rrweb" and e.get("event_payload") is not None]
-                            vc = [e.get("event_payload") for e in live_events if e.get("source") == "vscode" and e.get("event_payload") is not None]
-                            if rr:
-                                request_body["raw_rrweb_events"] = rr
-                            if vc:
-                                request_body["raw_vscode_events"] = vc
-                            logger.info(f"Attached live events: rrweb={len(rr)} vscode={len(vc)}")
-                            live_events.clear()
+                    trace_id = task.get("trace_id") if isinstance(task, dict) else None
+                    if trace_id:
+                        headers = {"X-Trace-Id": str(trace_id)}
+                        logger.info(f"[TRACE] Propagating trace_id={trace_id} to {full_url}")
                 except Exception:
-                    logger.debug("Failed to attach live events to request body", exc_info=True)
+                    headers = None
 
                 # POST with retry logic on timeouts and transient errors
                 last_error: Optional[Exception] = None
@@ -243,7 +261,7 @@ class LangGraphClient:
                         logger.info(
                             f"POST attempt {attempt}/{self.max_retries} -> {full_url}"
                         )
-                        async with session.post(full_url, json=request_body) as response:
+                        async with session.post(full_url, json=request_body, headers=headers) as response:
                             response.raise_for_status()
                             logger.info(
                                 f"LangGraphClient response status: {response.status}"

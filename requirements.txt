@@ -18,7 +18,7 @@ grpcio
 grpcio-tools
 click
 asyncio
-livekit.plugins.turn_detector 
+livekit-plugins-turn-detector
 # Pydantic for data validation
 pydantic
 
@@ -28,3 +28,11 @@ langchain
 
 # Protobuf for RPC communication
 protobuf
+google-cloud-storage
+redis>=5.0.0
+opentelemetry-sdk==1.26.0
+opentelemetry-exporter-otlp==1.26.0
+opentelemetry-instrumentation-fastapi==0.47b0
+opentelemetry-instrumentation-aiohttp-client==0.47b0
+opentelemetry-instrumentation-logging==0.47b0
+opentelemetry-semantic-conventions==0.47b0

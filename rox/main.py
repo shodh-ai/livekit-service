@@ -26,6 +26,10 @@ project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv
+from otel_setup import init_tracing
+from opentelemetry import trace as otel_trace
+from tracing import ensure_trace_id, set_trace_id, get_trace_id
+from logging_setup import install_logging_filter
 from pydantic import BaseModel
 
 # FastAPI imports for HTTP service mode
@@ -56,10 +60,12 @@ from generated.protos import interaction_pb2
 from rpc_services import AgentInteractionService
 from langgraph_client import LangGraphClient
 from frontend_client import FrontendClient
+from utils.gcs_signer import generate_v4_signed_url
 
 # from gemini_tts_client import GeminiTTSClient
 from utils.ui_action_factory import build_ui_action_request
 from browser_pod_client import BrowserPodClient
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # Configure logging
 logging.basicConfig(
@@ -69,6 +75,18 @@ logger = logging.getLogger(__name__)
 
 # --- Environment Loading and Validation ---
 load_dotenv(dotenv_path=project_root / ".env")
+
+# Initialize OpenTelemetry tracing for the service (global)
+try:
+    init_tracing(os.getenv("OTEL_SERVICE_NAME", "livekit-service"))
+except Exception:
+    pass
+
+# Ensure logs carry rox_trace_id and otel ids
+try:
+    install_logging_filter()
+except Exception:
+    pass
 
 
 # Environment variables validation (skip during testing AND during container startup)
@@ -280,6 +298,8 @@ class RoxAgent(Agent):
 
         # Processing queue for tasks from the Brain
         self._processing_queue: asyncio.Queue = asyncio.Queue()
+        # Pending scheduled task to end a user turn after hangover
+        self._pending_turn_end_task: Optional[asyncio.Task] = None
 
         # --- LLM Interceptor for Speech Processing ---
         self.llm_interceptor = self.TranscriptInterceptor(self)
@@ -326,6 +346,17 @@ class RoxAgent(Agent):
                 # Wait for a task to be queued (from user speech or RPC)
                 task = await self._processing_queue.get()
                 logger.info(f"DEQUEUED TASK: {json.dumps(task, indent=2)}")
+
+                # Set per-task trace context for logs and spans if present
+                try:
+                    tid = task.get("trace_id") if isinstance(task, dict) else None
+                    if tid:
+                        set_trace_id(tid)
+                        span = otel_trace.get_current_span()
+                        if span:
+                            span.set_attribute("rox.trace_id", tid)
+                except Exception:
+                    pass
 
                 # --- Handle special local tasks that don't need LangGraph ---
                 task_name = task.get("task_name")
@@ -471,6 +502,8 @@ class RoxAgent(Agent):
                     logger.info(
                         f"SESSION CONTEXT UPDATED. New current_lo_id is: {self.current_lo_id}"
                     )
+
+                # Persisting session state to Redis is disabled to keep livekit-service stateless
 
                 # 3. Extract the action script (delivery_plan) and execute it
                 delivery_plan = response.get("delivery_plan", {})
@@ -648,6 +681,51 @@ class RoxAgent(Agent):
                         logger.info(
                             f"Frontend client not available - would set UI state: {parameters}"
                         )
+
+                elif tool_name == "trigger_rrweb_replay":
+                    # Trigger rrweb replay on the frontend via RPC.
+                    # Transform GCS URLs to use the one-backend proxy endpoint for persistent access.
+                    raw_url = str(parameters.get("events_url", "") or "")
+                    asset_id = None
+                    
+                    try:
+                        # Extract asset_id from various URL formats
+                        if raw_url.startswith("gs://"):
+                            # gs://bucket/path/to/file.json -> path/to/file.json
+                            without = raw_url[5:]
+                            parts = without.split("/", 1)
+                            if len(parts) == 2:
+                                asset_id = parts[1]  # Skip bucket name
+                        elif "storage.googleapis.com/" in raw_url:
+                            # https://storage.googleapis.com/bucket/path/to/file.json -> path/to/file.json
+                            try:
+                                after = raw_url.split("storage.googleapis.com/", 1)[1]
+                                parts = after.split("/", 1)
+                                if len(parts) == 2:
+                                    asset_id = parts[1]  # Skip bucket name
+                            except Exception:
+                                pass
+                        else:
+                            # Assume it's already just the asset_id
+                            asset_id = raw_url
+                        
+                        # Construct proxy URL through one-backend
+                        backend_url = os.getenv("ONE_BACKEND_URL", "http://localhost:3001")
+                        proxy_url = f"{backend_url.rstrip('/')}/api/assets/rrweb/{asset_id}"
+                        logger.info(f"Transformed rrweb URL to proxy: {raw_url} -> {proxy_url}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to transform rrweb URL, using raw: {e}")
+                        proxy_url = raw_url
+
+                    if self._frontend_client:
+                        ok = await self._frontend_client.trigger_rrweb_replay(self._room, self.caller_identity, proxy_url)
+                        if ok:
+                            logger.info("Dispatched RRWEB_REPLAY to frontend")
+                        else:
+                            logger.error("Frontend RPC returned failure for RRWEB_REPLAY")
+                    else:
+                        logger.warning("Frontend client not available - would trigger rrweb replay")
 
                 elif tool_name == "speak" or tool_name == "speak_text":
                     text = parameters.get("text", "")
@@ -1571,6 +1649,62 @@ class RoxAgent(Agent):
         }
         await self._processing_queue.put(enriched_task)
 
+    async def optimistic_interrupt_ack(self, message: Optional[str] = None):
+        """Immediately acknowledge an interruption locally.
+
+        - Interrupt any ongoing TTS and pause current execution
+        - Send START_LISTENING_VISUAL to the frontend so the user's mic turns on immediately
+        - Set expectation to listen for an interruption
+
+        This is intentionally lightweight and does NOT contact the Brain; callers
+        should subsequently invoke `handle_interruption(...)` to forward context to LangGraph.
+        """
+        try:
+            logger.info("[INTERRUPTION][OPTIMISTIC] Acknowledging interrupt locally")
+
+            # Pause/cancel execution immediately (best-effort; full capture happens in handle_interruption)
+            self._is_paused = True
+            self._current_execution_cancelled = True
+
+            # Stop any ongoing TTS promptly
+            if self.agent_session:
+                try:
+                    self.agent_session.interrupt()
+                    logger.info("[INTERRUPTION][OPTIMISTIC] Stopped ongoing TTS")
+                except RuntimeError as e:
+                    logger.warning(f"[INTERRUPTION][OPTIMISTIC] Could not interrupt TTS: {e}")
+
+            # Immediately enable the student's microphone on the frontend
+            if self._frontend_client and self.caller_identity:
+                ok = await self._frontend_client.set_mic_enabled(
+                    room=self._room,
+                    identity=self.caller_identity,
+                    enabled=True,
+                    message=message or "You may speak now.",
+                )
+                if ok:
+                    logger.info("[INTERRUPTION][OPTIMISTIC] Dispatched START_LISTENING_VISUAL to frontend")
+                    # Optional: show a brief visual prompt on the UI
+                    try:
+                        await self._frontend_client.show_feedback(
+                            room=self._room,
+                            identity=self.caller_identity,
+                            feedback_type="info",
+                            message="Yes—what's your doubt?",
+                            duration_ms=1500,
+                        )
+                    except Exception:
+                        logger.debug("[INTERRUPTION][OPTIMISTIC] Failed to show feedback banner", exc_info=True)
+                else:
+                    logger.warning("[INTERRUPTION][OPTIMISTIC] Frontend rejected START_LISTENING_VISUAL")
+            else:
+                logger.warning("[INTERRUPTION][OPTIMISTIC] Frontend client or caller_identity missing; cannot enable mic")
+
+            # Update expectation state so subsequent speech is treated as an interruption
+            self._expected_user_input_type = "INTERRUPTION"
+        except Exception:
+            logger.error("[INTERRUPTION][OPTIMISTIC] Failed to acknowledge interrupt locally", exc_info=True)
+
     async def trigger_langgraph_task(
         self, task_name: str, json_payload: str, caller_identity: str
     ):
@@ -1951,7 +2085,11 @@ async def entrypoint(ctx: JobContext):
             # Optional: small prefix padding at start of speech chunks
             prefix_padding_duration=0.2,
         ),
-        # turn_detection=MultilingualModel(),
+        # STT-driven turn detector for robust end-of-utterance detection
+        turn_detection=MultilingualModel(
+            # Optional: make it less eager to end when content is unlikely
+            unlikely_threshold=float(os.getenv("TURN_UNLIKELY_THRESHOLD", "0.1"))
+        ),
     )
     rox_agent_instance.agent_session = main_agent_session
     # Store the LiveKit room reference for downstream clients (browser/frontend)
@@ -2022,45 +2160,65 @@ async def entrypoint(ctx: JobContext):
 
     # Enhanced user state handler for VAD-based automatic mic turn-off
     def _handle_user_state_change(ev):
-        logger.info(f"[VAD] User state changed: {ev.old_state} -> {ev.new_state}")
+        logger.info(f"[TURN] User state changed: {ev.old_state} -> {ev.new_state}")
 
-        # When user stops speaking (speaking -> listening), automatically turn off mic
+        HANGOVER_MS = int(os.getenv("TURN_HANGOVER_MS", "900"))
+
+        # Cancel any pending turn-end if speech resumes
+        if ev.old_state == "listening" and ev.new_state == "speaking":
+            try:
+                if (
+                    rox_agent_instance._pending_turn_end_task
+                    and not rox_agent_instance._pending_turn_end_task.done()
+                ):
+                    rox_agent_instance._pending_turn_end_task.cancel()
+                    rox_agent_instance._pending_turn_end_task = None
+                    logger.info("[TURN] Cancelled pending turn-end due to resumed speech")
+            except Exception:
+                logger.debug("[TURN] Failed cancelling pending turn-end", exc_info=True)
+            return
+
+        # Schedule a delayed mic-off when user stops speaking
         if ev.old_state == "speaking" and ev.new_state == "listening":
+            logger.info("[TURN] Scheduling mic-off after hangover")
 
-            logger.info(
-                "[VAD] User stopped speaking - auto-disabling mic and processing input"
-            )
+            # Cancel any prior pending task
+            try:
+                if (
+                    rox_agent_instance._pending_turn_end_task
+                    and not rox_agent_instance._pending_turn_end_task.done()
+                ):
+                    rox_agent_instance._pending_turn_end_task.cancel()
+            except Exception:
+                logger.debug("[TURN] Error cancelling old pending task", exc_info=True)
 
-            # ALWAYS turn off the mic when user stops speaking (regardless of transcript)
-            asyncio.create_task(rox_agent_instance._handle_vad_mic_off())
+            async def _delayed_end():
+                try:
+                    await asyncio.sleep(HANGOVER_MS / 1000.0)
+                    # Perform mic off and process transcript
+                    await rox_agent_instance._handle_vad_mic_off()
 
-            # Get the latest transcript from the TranscriptInterceptor buffer (if available)
-            transcript = ""
-            if (
-                hasattr(rox_agent_instance.llm_interceptor, "_buffer")
-                and rox_agent_instance.llm_interceptor._buffer
-            ):
+                    transcript = ""
+                    if (
+                        hasattr(rox_agent_instance.llm_interceptor, "_buffer")
+                        and rox_agent_instance.llm_interceptor._buffer
+                    ):
+                        transcript = " ".join(rox_agent_instance.llm_interceptor._buffer)
+                        rox_agent_instance.llm_interceptor._buffer.clear()
+                        logger.info(f"[TURN] Using buffered transcript: {transcript}")
 
-                # Get the most recent transcript from the buffer
-                transcript = " ".join(rox_agent_instance.llm_interceptor._buffer)
-                logger.info(f"[VAD] Found transcript: {transcript}")
+                    if transcript.strip():
+                        await rox_agent_instance._process_user_speech_auto(transcript)
+                    else:
+                        logger.info("[TURN] No transcript to process after hangover")
+                except asyncio.CancelledError:
+                    logger.info("[TURN] Hangover task cancelled")
+                except Exception:
+                    logger.debug("[TURN] Hangover task error", exc_info=True)
+                finally:
+                    rox_agent_instance._pending_turn_end_task = None
 
-                # Clear the buffer since we're processing it
-                rox_agent_instance.llm_interceptor._buffer.clear()
-            else:
-                logger.info(
-                    "[VAD] No transcript available - mic will still be disabled"
-                )
-
-            # Process speech if we have transcript content
-            if transcript.strip():
-                asyncio.create_task(
-                    rox_agent_instance._process_user_speech_auto(transcript)
-                )
-            else:
-                logger.info(
-                    "[VAD] No speech content to process, but mic disabled successfully"
-                )
+            rox_agent_instance._pending_turn_end_task = asyncio.create_task(_delayed_end())
 
     # Register the VAD handler AFTER rox_agent_instance is created
     main_agent_session.on("user_state_changed", _handle_user_state_change)
@@ -2247,6 +2405,7 @@ def run_agent(agent_request: AgentRequest):
         return {"message": f"Agent started for room {room_name}", "pid": process.pid}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to run agent: {str(e)}")
+
 
 
 class BrowserCommandRequest(BaseModel):
