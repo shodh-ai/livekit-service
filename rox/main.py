@@ -683,42 +683,43 @@ class RoxAgent(Agent):
                         )
 
                 elif tool_name == "trigger_rrweb_replay":
-                    # Trigger rrweb overlay replay on the frontend via RPC.
-                    # If the URL points to a GCS object and public access is blocked,
-                    # attempt to generate a short-lived signed URL.
+                    # Trigger rrweb replay on the frontend via RPC.
+                    # Transform GCS URLs to use the one-backend proxy endpoint for persistent access.
                     raw_url = str(parameters.get("events_url", "") or "")
-                    final_url = raw_url
+                    asset_id = None
+                    
                     try:
-                        # Accept either gs://bucket/object or https://storage.googleapis.com/bucket/object
-                        bucket_name = None
-                        object_name = None
+                        # Extract asset_id from various URL formats
                         if raw_url.startswith("gs://"):
+                            # gs://bucket/path/to/file.json -> path/to/file.json
                             without = raw_url[5:]
                             parts = without.split("/", 1)
                             if len(parts) == 2:
-                                bucket_name, object_name = parts[0], parts[1]
+                                asset_id = parts[1]  # Skip bucket name
                         elif "storage.googleapis.com/" in raw_url:
-                            # e.g., https://storage.googleapis.com/bucket/object
+                            # https://storage.googleapis.com/bucket/path/to/file.json -> path/to/file.json
                             try:
                                 after = raw_url.split("storage.googleapis.com/", 1)[1]
                                 parts = after.split("/", 1)
                                 if len(parts) == 2:
-                                    bucket_name, object_name = parts[0], parts[1]
+                                    asset_id = parts[1]  # Skip bucket name
                             except Exception:
                                 pass
-
-                        if bucket_name and object_name:
-                            signed = generate_v4_signed_url(bucket_name, object_name, expiration_seconds=int(os.getenv("GCS_SIGNED_URL_TTL", "600")))
-                            if signed:
-                                final_url = signed
-                                logger.info(f"Signed URL generated for rrweb replay: gs://{bucket_name}/{object_name}")
-                            else:
-                                logger.warning("Signed URL generation failed; falling back to raw events_url")
-                    except Exception:
-                        logger.debug("Error while attempting to generate signed URL", exc_info=True)
+                        else:
+                            # Assume it's already just the asset_id
+                            asset_id = raw_url
+                        
+                        # Construct proxy URL through one-backend
+                        backend_url = os.getenv("ONE_BACKEND_URL", "http://localhost:3001")
+                        proxy_url = f"{backend_url.rstrip('/')}/api/assets/rrweb/{asset_id}"
+                        logger.info(f"Transformed rrweb URL to proxy: {raw_url} -> {proxy_url}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to transform rrweb URL, using raw: {e}")
+                        proxy_url = raw_url
 
                     if self._frontend_client:
-                        ok = await self._frontend_client.trigger_rrweb_replay(self._room, self.caller_identity, final_url)
+                        ok = await self._frontend_client.trigger_rrweb_replay(self._room, self.caller_identity, proxy_url)
                         if ok:
                             logger.info("Dispatched RRWEB_REPLAY to frontend")
                         else:
