@@ -1441,6 +1441,55 @@ class RoxAgent(Agent):
                             "Frontend client not available or no events_url provided for rrweb replay."
                         )
 
+                elif tool_name == "replay_parsed_rrweb_actions":
+                    # NEW: Replay parsed rrweb actions via browser_manager
+                    # This queries Brum for parsed actions and sends them to browser_manager
+                    curriculum_id = parameters.get("curriculum_id")
+                    lo_id = parameters.get("lo_id")
+                    delay_ms = parameters.get("delay_ms", 500)
+                    
+                    if not curriculum_id or not lo_id:
+                        logger.warning("Missing curriculum_id or lo_id for replay_parsed_rrweb_actions")
+                        continue
+                    
+                    logger.info(f"Replaying parsed rrweb actions: curriculum={curriculum_id}, lo={lo_id}")
+                    
+                    try:
+                        # Query Brum for parsed actions
+                        # TODO: Implement Brum query endpoint for parsed actions
+                        # For now, we'll send the query params to browser_manager
+                        # and let it handle the Brum query
+                        
+                        # Find browser-bot participant
+                        browser_identity = None
+                        for pid, participant in self._room.remote_participants.items():
+                            ident = str(getattr(participant, "identity", "") or pid)
+                            if ident.startswith("browser-bot-"):
+                                browser_identity = ident
+                                break
+                        
+                        if not browser_identity:
+                            logger.warning("No browser-bot participant found for replay_parsed_rrweb_actions")
+                            continue
+                        
+                        # Send command to browser_manager via data channel
+                        command = {
+                            "type": "replay_rrweb_sequence_from_brum",
+                            "curriculum_id": curriculum_id,
+                            "lo_id": lo_id,
+                            "delay_ms": delay_ms
+                        }
+                        
+                        await self._room.local_participant.publish_data(
+                            json.dumps(command).encode('utf-8'),
+                            destination_identities=[browser_identity]
+                        )
+                        
+                        logger.info(f"Sent replay_parsed_rrweb_actions command to {browser_identity}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to replay parsed rrweb actions: {e}", exc_info=True)
+
                 elif tool_name == "get_block_content":
                     # Request content of a whiteboard feed block from the frontend and feed back to LangGraph
                     block_id = str(parameters.get("block_id") or parameters.get("id") or "").strip()
