@@ -283,6 +283,13 @@ enum ClientUIActionType {
   ADD_EXCALIDRAW_BLOCK = 201;           // Add a new Excalidraw block to the feed
   UPDATE_EXCALIDRAW_BLOCK = 202;        // Update elements/content of an existing Excalidraw block
   FOCUS_ON_BLOCK = 203;                 // Scroll/focus the UI on a particular block
+  
+  // Cinematic Demo Actions
+  SHOW_MEDIA_ON_FEED = 80;              // Display images/GIFs/memes in conversational feed
+  HIGHLIGHT_UI_ELEMENT = 81;            // Highlight a UI element with glowing border and tooltip
+  PLAY_AUDIO_SNIPPET = 82;              // Play a segment of an audio file (expert voice)
+  END_SESSION = 83;                     // End demo session with final message
+  SCENE_METADATA = 84;                  // Send scene completion metadata for autoplay engine
 }
 // Request from Agent to Client to perform a UI action
 message AgentToClientUIActionRequest {

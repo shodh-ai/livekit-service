@@ -390,3 +390,106 @@ class FrontendClient:
         
         response = await self._send_rpc(room, identity, action_type, params)
         return response is not None and response.success
+
+    # --- NEW CINEMATIC DEMO METHODS ---
+    
+    async def show_media_on_feed(self, room: rtc.Room, identity: str, media_type: str, url: str, caption: str = "") -> bool:
+        """
+        Display media (image/GIF/meme) directly in the conversational feed.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            media_type: Type of media ("image", "gif", "meme")
+            url: Public URL of the media
+            caption: Optional caption text
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {
+            "media_type": media_type,
+            "url": url,
+            "caption": caption
+        }
+        response = await self._send_rpc(room, identity, "SHOW_MEDIA_ON_FEED", params)
+        return response is not None and response.success
+
+    async def highlight_ui_element(self, room: rtc.Room, identity: str, selector: str, text: str) -> bool:
+        """
+        Highlight a UI element with a glowing border and tooltip.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            selector: CSS selector for the element
+            text: Tooltip text to display
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {
+            "selector": selector,
+            "text": text
+        }
+        response = await self._send_rpc(room, identity, "HIGHLIGHT_UI_ELEMENT", params)
+        return response is not None and response.success
+
+    async def play_audio_snippet(self, room: rtc.Room, identity: str, asset_id: str, start_time_ms: int = 0, duration_ms: int = 0) -> bool:
+        """
+        Play a segment of an audio file (e.g., expert's voice).
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            asset_id: GCS asset ID of the audio file
+            start_time_ms: Start time in milliseconds
+            duration_ms: Duration to play in milliseconds
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {
+            "asset_id": asset_id,
+            "start_time_ms": start_time_ms,
+            "duration_ms": duration_ms
+        }
+        response = await self._send_rpc(room, identity, "PLAY_AUDIO_SNIPPET", params)
+        return response is not None and response.success
+
+    async def end_session(self, room: rtc.Room, identity: str, final_message: str) -> bool:
+        """
+        End the demo session with a final message.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            final_message: Final message to display
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {
+            "final_message": final_message
+        }
+        response = await self._send_rpc(room, identity, "END_SESSION", params)
+        return response is not None and response.success
+
+    async def send_scene_metadata(self, room: rtc.Room, identity: str, metadata: Dict[str, Any]) -> bool:
+        """
+        Send scene metadata to frontend to signal end of scene and autoplay instructions.
+        This is the critical signal that enables the autoplay engine.
+        
+        Args:
+            room: The LiveKit room
+            identity: The client identity
+            metadata: Scene metadata including continue_mode, step_index, etc.
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        params = {
+            "metadata": metadata
+        }
+        response = await self._send_rpc(room, identity, "SCENE_METADATA", params)
+        return response is not None and response.success

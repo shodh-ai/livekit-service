@@ -288,6 +288,7 @@ class RoxAgent(Agent):
         # Plan pause/resume state
         self._current_delivery_plan: Optional[List[Dict]] = None
         self._current_plan_index: int = 0
+        self._current_plan_metadata: Optional[Dict[str, Any]] = None  # Store metadata for autoplay
 
         # Interruption context storage for resumption
         self._interrupted_plan: Optional[List[Dict]] = None
@@ -514,6 +515,8 @@ class RoxAgent(Agent):
                     if isinstance(delivery_plan, dict)
                     else {}
                 )
+                # Store metadata for autoplay engine
+                self._current_plan_metadata = metadata
 
                 # Proactively emit Suggested Responses if provided only in metadata
                 try:
@@ -1488,6 +1491,82 @@ class RoxAgent(Agent):
                             "Frontend client not available - would get canvas elements"
                         )
 
+                # --- NEW CINEMATIC DEMO TOOLS ---
+                elif tool_name == "web_search":
+                    # Perform live web search and return results
+                    query = parameters.get("query", "")
+                    if query:
+                        # TODO: Implement actual web search via search API
+                        logger.info(f"[WEB_SEARCH] Performing search for: {query}")
+                        # For now, log that this would trigger a search
+                        # In production, this would call a search API and return results to the brain
+                    else:
+                        logger.warning("[WEB_SEARCH] No query provided")
+
+                elif tool_name == "show_media_on_feed":
+                    # Display media (image/GIF/meme) in the conversational feed
+                    if self._frontend_client:
+                        await self._frontend_client.show_media_on_feed(
+                            self._room,
+                            self.caller_identity,
+                            media_type=parameters.get("media_type", "image"),
+                            url=parameters.get("url", ""),
+                            caption=parameters.get("caption", "")
+                        )
+                        logger.info(f"[SHOW_MEDIA] Displayed {parameters.get('media_type')} on feed: {parameters.get('url')}")
+                    else:
+                        logger.warning(
+                            f"Frontend client not available - would show media: {parameters}"
+                        )
+
+                elif tool_name == "highlight_ui_element":
+                    # Highlight a UI element with tooltip
+                    if self._frontend_client:
+                        await self._frontend_client.highlight_ui_element(
+                            self._room,
+                            self.caller_identity,
+                            selector=parameters.get("selector", ""),
+                            text=parameters.get("text", "")
+                        )
+                        logger.info(f"[HIGHLIGHT_UI] Highlighted element: {parameters.get('selector')}")
+                    else:
+                        logger.warning(
+                            f"Frontend client not available - would highlight UI element: {parameters}"
+                        )
+
+                elif tool_name == "play_audio_snippet":
+                    # Play a segment of an audio file (expert's voice)
+                    if self._frontend_client:
+                        await self._frontend_client.play_audio_snippet(
+                            self._room,
+                            self.caller_identity,
+                            asset_id=parameters.get("asset_id", ""),
+                            start_time_ms=parameters.get("start_time_ms", 0),
+                            duration_ms=parameters.get("duration_ms", 0)
+                        )
+                        logger.info(f"[PLAY_AUDIO] Playing audio snippet from asset: {parameters.get('asset_id')}")
+                    else:
+                        logger.warning(
+                            f"Frontend client not available - would play audio snippet: {parameters}"
+                        )
+
+                elif tool_name == "end_session":
+                    # End the demo session with a final message
+                    final_message = parameters.get("final_message", "Thank you!")
+                    if self._frontend_client:
+                        await self._frontend_client.end_session(
+                            self._room,
+                            self.caller_identity,
+                            final_message=final_message
+                        )
+                        logger.info(f"[END_SESSION] Session ended with message: {final_message}")
+                    else:
+                        logger.warning(
+                            f"Frontend client not available - would end session: {final_message}"
+                        )
+                    # Also stop the agent processing loop
+                    self._session_ended = True
+
                 else:
                     logger.warning(f"Unknown tool_name: {tool_name}")
 
@@ -1496,6 +1575,20 @@ class RoxAgent(Agent):
                     f"Error executing action '{tool_name}': {action_err}", exc_info=True
                 )
                 # Continue with next action rather than failing entire toolbelt
+
+        # --- CRITICAL: Send scene metadata to frontend for autoplay engine ---
+        # After all actions are executed, send the metadata to signal scene completion
+        # This enables the frontend to check for continue_mode === "AUTO" and trigger next scene
+        if self._frontend_client and self._current_plan_metadata:
+            try:
+                logger.info(f"[SCENE_END] Sending scene metadata to frontend: {self._current_plan_metadata}")
+                await self._frontend_client.send_scene_metadata(
+                    self._room, 
+                    self.caller_identity, 
+                    self._current_plan_metadata
+                )
+            except Exception as metadata_err:
+                logger.error(f"[SCENE_END] Failed to send scene metadata: {metadata_err}", exc_info=True)
 
     def _optimize_speech_actions(
         self, toolbelt: List[Dict[str, Any]]
