@@ -65,7 +65,8 @@ from utils.gcs_signer import generate_v4_signed_url
 # from gemini_tts_client import GeminiTTSClient
 from utils.ui_action_factory import build_ui_action_request
 from browser_pod_client import BrowserPodClient
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+# Note: heavy turn detection models can trigger a supervised inference subprocess
+# which may OOM on constrained containers. We will import lazily only if enabled.
 
 # Configure logging
 logging.basicConfig(
@@ -2110,36 +2111,52 @@ async def entrypoint(ctx: JobContext):
 
     # Create AgentSession with audio capabilities and LLM interceptor
     # The LLM interceptor will process user speech and forward to LangGraph
-    main_agent_session = agents.AgentSession(
-        stt=deepgram.STT(
+    # Build AgentSession kwargs to allow conditional inclusion of turn detection
+    session_kwargs = {
+        "stt": deepgram.STT(
             model="nova-2",
             language="en",
             api_key=os.environ.get("DEEPGRAM_API_KEY"),
-            # Add real-time STT settings for better capture
             interim_results=True,
             punctuate=True,
             smart_format=True,
         ),
-        llm=rox_agent_instance.llm_interceptor,
-        tts=deepgram.TTS(
+        "llm": rox_agent_instance.llm_interceptor,
+        "tts": deepgram.TTS(
             model="aura-2-helena-en",
             api_key=os.environ.get("DEEPGRAM_API_KEY"),
-            # Only use supported parameters for connection stability
             encoding="linear16",
             sample_rate=24000,
         ),
-        vad=silero.VAD.load(
-            # Wait ~1s of silence before end-of-speech
+        "vad": silero.VAD.load(
             min_silence_duration=1.0,
-            # Optional: small prefix padding at start of speech chunks
             prefix_padding_duration=0.2,
         ),
-        # STT-driven turn detector for robust end-of-utterance detection
-        turn_detection=MultilingualModel(
-            # Optional: make it less eager to end when content is unlikely
-            unlikely_threshold=float(os.getenv("TURN_UNLIKELY_THRESHOLD", "0.1"))
-        ),
-    )
+    }
+
+    # Disable heavy turn detection by default to avoid OOM in inference subprocess.
+    # Enable by setting ENABLE_TURN_DETECTION=true. If enabled, prefer the lighter English model.
+    if os.getenv("ENABLE_TURN_DETECTION", "false").lower() == "true":
+        try:
+            model_choice = os.getenv("TURN_DETECTION_MODEL", "english").lower()
+            if model_choice == "multilingual":
+                from livekit.plugins.turn_detector.multilingual import MultilingualModel as _TDModel
+            else:
+                from livekit.plugins.turn_detector.english import EnglishModel as _TDModel
+
+            session_kwargs["turn_detection"] = _TDModel(
+                unlikely_threshold=float(os.getenv("TURN_UNLIKELY_THRESHOLD", "0.1"))
+            )
+            logger.info(f"Turn detection enabled using model: {model_choice}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to enable turn detection, proceeding without it: {e}",
+                exc_info=True,
+            )
+    else:
+        logger.info("Turn detection disabled (ENABLE_TURN_DETECTION=false). Using VAD-only.")
+
+    main_agent_session = agents.AgentSession(**session_kwargs)
     rox_agent_instance.agent_session = main_agent_session
     # Store the LiveKit room reference for downstream clients (browser/frontend)
     try:
