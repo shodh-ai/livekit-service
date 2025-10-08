@@ -29,6 +29,10 @@ ENV/
 .venv*
 roma/
 
+# Also ignore named/variant virtualenvs
+venv-py311/
+venv-*/
+
 # Environment variables
 .env
 .env.*
