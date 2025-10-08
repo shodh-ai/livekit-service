@@ -40,6 +40,11 @@ RUN touch generated/__init__.py && \
 # Set Python path to include the project root
 ENV PYTHONPATH=/app
 
+# Optionally pre-download any required runtime assets referenced by rox/main.py.
+# Docs suggest running `python main.py download-files` inside rox/.
+# Make this step non-fatal if the command is not implemented.
+RUN cd rox && python main.py download-files || echo "[info] download-files not available; skipping pre-download"
+
 # Expose the port that Cloud Run expects
 EXPOSE 8080
 
