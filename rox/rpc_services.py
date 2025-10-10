@@ -62,21 +62,9 @@ class AgentInteractionService:
                     await self.agent.optimistic_interrupt_ack("Yes — go ahead, what's your doubt?")
                 except Exception as e:
                     logger.warning(f"Optimistic interrupt ack failed (continuing): {e}")
-
-                # Build task for Brain processing
-                task = {
-                    "task_name": "student_wants_to_interrupt",
-                    "caller_identity": raw_payload.caller_identity,
-                    "interrupt_type": "voice",
-                    "interaction_type": "interruption"
-                }
-
-                # Schedule full interruption handling in background
-                try:
-                    asyncio.create_task(self.agent.handle_interruption(task))
-                    logger.info("Scheduled handle_interruption in background after optimistic ack (voice)")
-                except Exception as e:
-                    logger.error(f"Failed to schedule handle_interruption for voice interrupt: {e}")
+                # Legacy forwarding to Kamikaze on mic press has been removed.
+                # We now wait for the actual speech event (student_spoke_or_acted)
+                # to forward content to the Brain, avoiding duplicate "Yes?" audio.
 
             response_pb = interaction_pb2.AgentResponse(
                 status_message="Interrupt acknowledged. You may speak now."
@@ -214,21 +202,9 @@ class AgentInteractionService:
                     await self.agent.optimistic_interrupt_ack("Yes — go ahead, what's your doubt?")
                 except Exception as e:
                     logger.warning(f"Optimistic interrupt ack failed (continuing): {e}")
-
-                # Build task to forward to LangGraph in background
-                task = {
-                    "task_name": "student_mic_button_interrupt",
-                    "caller_identity": raw_payload.caller_identity,
-                    "interrupt_type": "mic_button",
-                    "interaction_type": "interruption"
-                }
-
-                # Schedule full interruption handling without blocking the RPC response
-                try:
-                    asyncio.create_task(self.agent.handle_interruption(task))
-                    logger.info("Scheduled handle_interruption in background after optimistic ack")
-                except Exception as e:
-                    logger.error(f"Failed to schedule handle_interruption: {e}")
+                # Legacy forwarding to Kamikaze on mic press has been removed.
+                # We now wait for the actual speech event (student_spoke_or_acted)
+                # to forward content to the Brain, avoiding duplicate "Yes?" audio.
 
             response_pb = interaction_pb2.AgentResponse(
                 status_message="Mic interrupt acknowledged. You may speak now."

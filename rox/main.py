@@ -202,15 +202,7 @@ class RoxAgent(Agent):
             if transcript:
                 logger.info(f"Adding transcript to buffer: {transcript}")
                 self._buffer.append(transcript)
-                # reset debounce timer
-                if self._debounce_handle:
-                    self._debounce_handle.cancel()
-                loop = asyncio.get_event_loop()
-                self._debounce_handle = loop.call_later(
-                    self._debounce_ms / 1000.0,
-                    lambda: asyncio.create_task(self._flush()),
-                )
-                logger.info(f"Set debounce timer for {self._debounce_ms}ms")
+                logger.info("Transcript buffered; VAD handler will flush on turn end")
             else:
                 logger.warning("No transcript found in chat context")
 
