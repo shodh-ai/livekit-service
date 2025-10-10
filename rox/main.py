@@ -2547,45 +2547,6 @@ async def entrypoint(ctx: JobContext):
         agent=rox_agent_instance,
     )
 
-    # --- THIS IS THE NEW PROACTIVE START LOGIC ---
-    logger.info("Agent is live. Checking for student to initiate conversation.")
-    try:
-        # Give a moment for the frontend participant to be fully connected.
-        await asyncio.sleep(2)
-
-        if len(ctx.room.remote_participants) > 0:
-            # We already have the student's identity from the handshake check
-            if not rox_agent_instance.caller_identity:
-                rox_agent_instance.caller_identity = list(
-                    ctx.room.remote_participants.keys()
-                )[0]
-
-            logger.info(
-                f"Student '{rox_agent_instance.caller_identity}' is present. Queueing proactive start task."
-            )
-
-            # Create a special, predefined task.
-            # CRITICAL: It has NO 'transcript' because the student hasn't spoken.
-            # Only start session if not already started (prevent duplicates)
-            if not rox_agent_instance._session_started:
-                initial_task = {
-                    "task_name": "start_tutoring_session",
-                    "caller_identity": rox_agent_instance.caller_identity,
-                }
-
-                # Queue this initial task. The processing_loop will pick it up.
-                await rox_agent_instance._processing_queue.put(initial_task)
-                rox_agent_instance._session_started = True
-                logger.info("Student joined: Queued initial session start task")
-
-        else:
-            logger.warning(
-                "No student in the room. Agent will wait for a participant to join."
-            )
-
-    except Exception as e:
-        logger.error(f"Failed during proactive start sequence: {e}", exc_info=True)
-
     # Keep the agent alive by waiting for the processing task
     await processing_task
 

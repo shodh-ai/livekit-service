@@ -8,6 +8,7 @@ Handles UI state changes and visual actions.
 import logging
 import uuid
 import base64
+import os
 from typing import Dict, Any, Optional, List
 from livekit import rtc
 from generated.protos import interaction_pb2
@@ -53,12 +54,13 @@ class FrontendClient:
             payload_bytes = request_pb.SerializeToString()
             base64_encoded_payload = base64.b64encode(payload_bytes).decode("utf-8")
 
-            # Send the RPC
+            # Send the RPC, allowing caller to extend the LiveKit response timeout
             async def _do_rpc():
                 return await room.local_participant.perform_rpc(
                     destination_identity=identity,
                     method=self.rpc_method_name,
                     payload=base64_encoded_payload,
+                    response_timeout=timeout_sec,
                 )
 
             if timeout_sec and timeout_sec > 0:
@@ -132,7 +134,14 @@ class FrontendClient:
         }
         
         action_type = action_type_map.get(tool_name, tool_name.upper())
-        response = await self._send_rpc(room, identity, action_type, params)
+        # Set a longer timeout for potentially slow visualizations
+        _t_env = os.getenv("FRONTEND_VISUALIZATION_TIMEOUT_SEC")
+        try:
+            _vis_timeout = float(_t_env) if _t_env else 30.0
+        except Exception:
+            _vis_timeout = 30.0
+        timeout = _vis_timeout if action_type == "GENERATE_VISUALIZATION" else None
+        response = await self._send_rpc(room, identity, action_type, params, timeout_sec=timeout)
         return response is not None and response.success
 
     async def send_suggested_responses(
@@ -297,7 +306,19 @@ class FrontendClient:
         else:
             params = {"elements": []}
         
-        response = await self._send_rpc(room, identity, "GENERATE_VISUALIZATION", params)
+        # Use extended timeout for visualization generation
+        _t_env = os.getenv("FRONTEND_VISUALIZATION_TIMEOUT_SEC")
+        try:
+            _vis_timeout = float(_t_env) if _t_env else 30.0
+        except Exception:
+            _vis_timeout = 30.0
+        response = await self._send_rpc(
+            room,
+            identity,
+            "GENERATE_VISUALIZATION",
+            params,
+            timeout_sec=_vis_timeout,
+        )
         return response is not None and response.success
 
     async def highlight_elements(self, room: rtc.Room, identity: str, element_ids: list, highlight_type: str = "attention", duration_ms: int = 3000) -> bool:
