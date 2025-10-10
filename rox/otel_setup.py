@@ -7,8 +7,14 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter as OTLPSpanExporterGRPC
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter as OTLPSpanExporterHTTP
 from opentelemetry.instrumentation.aiohttp_client import AioHttpClientInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
+
+# HTTPX instrumentation is optional; guard import to avoid hard failure if package is absent
+try:
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor  # type: ignore
+    _HTTPX_INSTR_AVAILABLE = True
+except Exception:
+    _HTTPX_INSTR_AVAILABLE = False
 
 # Optional: OTel Logs support
 try:
@@ -164,7 +170,8 @@ def init_tracing(service_name: str | None = None) -> None:
     except Exception:
         pass
     try:
-        HTTPXClientInstrumentor().instrument()
+        if _HTTPX_INSTR_AVAILABLE:
+            HTTPXClientInstrumentor().instrument()
     except Exception:
         pass
     try:

@@ -143,7 +143,15 @@ class LangGraphClient:
         # Pass-through enriched context from frontend/session if provided
         try:
             if task.get("restored_feed_summary") is not None:
-                request_body["restored_feed_summary"] = task.get("restored_feed_summary")
+                rfs = task.get("restored_feed_summary")
+                # Normalize to list to match Kamikaze's expected schema (List[Dict])
+                if isinstance(rfs, dict) and "blocks" in rfs and isinstance(rfs["blocks"], list):
+                    request_body["restored_feed_summary"] = rfs["blocks"]
+                elif isinstance(rfs, list):
+                    request_body["restored_feed_summary"] = rfs
+                else:
+                    # Fallback: coerce single object into a single-element list
+                    request_body["restored_feed_summary"] = [rfs]
         except Exception:
             pass
         try:
@@ -262,9 +270,19 @@ class LangGraphClient:
                             f"POST attempt {attempt}/{self.max_retries} -> {full_url}"
                         )
                         async with session.post(full_url, json=request_body, headers=headers) as response:
+                            status = response.status
+                            if 400 <= status < 500:
+                                # Do not retry on client errors; capture body for diagnosis
+                                try:
+                                    err_text = await response.text()
+                                except Exception:
+                                    err_text = "<no body>"
+                                logger.error(f"LangGraphClient 4xx response {status} from {full_url}: {err_text}")
+                                return None
+                            # For 5xx and others, raise for retry handling
                             response.raise_for_status()
                             logger.info(
-                                f"LangGraphClient response status: {response.status}"
+                                f"LangGraphClient response status: {status}"
                             )
 
                             # Try to parse JSON, otherwise capture text
@@ -310,6 +328,21 @@ class LangGraphClient:
                         else:
                             logger.error(
                                 f"All retries exhausted due to timeout: {e}",
+                            )
+                            break
+                    except aiohttp.ClientResponseError as e:
+                        # Raised by raise_for_status(); treat 5xx as retryable, 4xx handled above
+                        last_error = e
+                        if 500 <= e.status < 600 and attempt < self.max_retries:
+                            delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
+                            logger.warning(
+                                f"Server error {e.status} on attempt {attempt}/{self.max_retries}. Retrying in {delay:.2f}s..."
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error(
+                                f"Non-retryable HTTP error or retries exhausted: {e}"
                             )
                             break
                     except aiohttp.ClientError as e:

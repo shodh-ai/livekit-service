@@ -20,6 +20,8 @@ import uuid
 import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+import time
+import contextlib
 
 # Add project root to path for clean imports
 project_root = Path(__file__).resolve().parent
@@ -28,6 +30,8 @@ sys.path.insert(0, str(project_root))
 from dotenv import load_dotenv
 from otel_setup import init_tracing
 from opentelemetry import trace as otel_trace
+from opentelemetry import context as otel_context
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from tracing import ensure_trace_id, set_trace_id, get_trace_id
 from logging_setup import install_logging_filter
 from pydantic import BaseModel
@@ -73,6 +77,9 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Debounce window to suppress duplicate mic-enable RPCs (in seconds)
+MIC_ENABLE_DEBOUNCE_SEC = float(os.getenv("MIC_ENABLE_DEBOUNCE_SEC", "0.5"))
 
 # --- Environment Loading and Validation ---
 load_dotenv(dotenv_path=project_root / ".env")
@@ -296,6 +303,8 @@ class RoxAgent(Agent):
         self._interrupted_plan_context: Optional[Dict] = None
         self._interruption_timestamp: Optional[float] = None
         self._is_paused: bool = False
+        # Debounce tracking for mic enables
+        self._last_mic_enable_ts: Optional[float] = None
 
         # Processing queue for tasks from the Brain
         self._processing_queue: asyncio.Queue = asyncio.Queue()
@@ -425,9 +434,7 @@ class RoxAgent(Agent):
                                                         self._room,
                                                         browser_pod_identity,
                                                         "browser_navigate",
-                                                        {
-                                                            "url": "https://www.example.com"
-                                                        },
+
                                                     )
                                                     self._initial_nav_sent = True
                                                     logger.info(
@@ -453,8 +460,8 @@ class RoxAgent(Agent):
                                 await self._browser_pod_client.send_browser_command(
                                     self._room,
                                     browser_pod_identity,
-                                    "browser_navigate",
-                                    {"url": "https://www.example.com"},
+                                    "browser_navigate"
+                                  
                                 )
                                 logger.info(
                                     f"[AUTO] Sent initial navigate to example.com -> {browser_pod_identity}"
@@ -745,6 +752,12 @@ class RoxAgent(Agent):
 
                             # Add small delay to prevent connection issues
                             await asyncio.sleep(0.1)
+
+                            # Ensure any prior playback (e.g., ack) is stopped before new TTS
+                            try:
+                                self.agent_session.interrupt()
+                            except RuntimeError:
+                                pass
 
                             playback_handle = await self.agent_session.say(
                                 cleaned_text, allow_interruptions=True
@@ -1223,13 +1236,20 @@ class RoxAgent(Agent):
 
                     # Also enable microphone in frontend to allow student to speak
                     if self._frontend_client:
-                        await self._frontend_client.set_mic_enabled(
-                            self._room,
-                            self.caller_identity,
-                            True,
-                            message="You may speak now...",
-                        )
-                        logger.info("[LISTEN] Enabled microphone for student input")
+                        now = time.time()
+                        if self._last_mic_enable_ts is None or (now - self._last_mic_enable_ts) > MIC_ENABLE_DEBOUNCE_SEC:
+                            await self._frontend_client.set_mic_enabled(
+                                self._room,
+                                self.caller_identity,
+                                True,
+                                message="You may speak now...",
+                            )
+                            self._last_mic_enable_ts = now
+                            logger.info("[LISTEN] Enabled microphone for student input")
+                        else:
+                            logger.info(
+                                f"[LISTEN] Skipping mic enable due to debounce (dt={(now - self._last_mic_enable_ts):.3f}s)"
+                            )
                     else:
                         logger.warning(
                             "[LISTEN] Frontend client not available - microphone not enabled"
@@ -1241,19 +1261,26 @@ class RoxAgent(Agent):
                         logger.info(
                             f"[START_LISTENING_VISUAL] Attempting to enable mic for caller_identity: {self.caller_identity}"
                         )
-                        success = await self._frontend_client.set_mic_enabled(
-                            self._room,
-                            self.caller_identity,
-                            True,
-                            message=parameters.get("message", ""),
-                        )
-                        if success:
-                            logger.info(
-                                f"[START_LISTENING_VISUAL] Successfully enabled microphone: {parameters.get('message', '')}"
+                        now = time.time()
+                        if self._last_mic_enable_ts is None or (now - self._last_mic_enable_ts) > MIC_ENABLE_DEBOUNCE_SEC:
+                            success = await self._frontend_client.set_mic_enabled(
+                                self._room,
+                                self.caller_identity,
+                                True,
+                                message=parameters.get("message", ""),
                             )
+                            if success:
+                                self._last_mic_enable_ts = now
+                                logger.info(
+                                    f"[START_LISTENING_VISUAL] Successfully enabled microphone: {parameters.get('message', '')}"
+                                )
+                            else:
+                                logger.error(
+                                    f"[START_LISTENING_VISUAL] Failed to enable microphone via RPC. caller_identity: {self.caller_identity}, room: {self._room is not None}"
+                                )
                         else:
-                            logger.error(
-                                f"[START_LISTENING_VISUAL] Failed to enable microphone via RPC. caller_identity: {self.caller_identity}, room: {self._room is not None}"
+                            logger.info(
+                                f"[START_LISTENING_VISUAL] Skipping mic enable due to debounce (dt={(now - self._last_mic_enable_ts):.3f}s)"
                             )
                     else:
                         logger.warning(
@@ -1724,6 +1751,31 @@ class RoxAgent(Agent):
                 except RuntimeError as e:
                     logger.warning(f"[INTERRUPTION][OPTIMISTIC] Could not interrupt TTS: {e}")
 
+            # Speak a quick local acknowledgement to reduce perceived latency
+            # Allow interruptions so student speech cuts this off naturally
+            try:
+                if self.agent_session:
+                    ack_text = (message or "Yes — go ahead, what's your doubt?").strip()
+                    if ack_text:
+                        logger.info(f"[INTERRUPTION][OPTIMISTIC] Speaking quick ack: {ack_text}")
+                        playback_handle = await self.agent_session.say(
+                            ack_text, allow_interruptions=True
+                        )
+                        # Do not block; wait briefly in background and time out if needed
+                        async def _wait_short_ack():
+                            try:
+                                await asyncio.wait_for(playback_handle, timeout=2.5)
+                            except asyncio.TimeoutError:
+                                try:
+                                    playback_handle.interrupt()
+                                except Exception:
+                                    pass
+                            except Exception:
+                                logger.debug("[INTERRUPTION][OPTIMISTIC] Ack TTS ended with error", exc_info=True)
+                        asyncio.create_task(_wait_short_ack())
+            except Exception:
+                logger.debug("[INTERRUPTION][OPTIMISTIC] Failed to start ack TTS", exc_info=True)
+
             # Immediately enable the student's microphone on the frontend
             if self._frontend_client and self.caller_identity:
                 ok = await self._frontend_client.set_mic_enabled(
@@ -1938,6 +1990,11 @@ async def entrypoint(ctx: JobContext):
     - Registers specialized RPC handlers
     - Starts processing loop and agent session
     """
+    # Create a root span to make trace context active for the whole agent job
+    tracer = otel_trace.get_tracer(__name__)
+    _root_span = tracer.start_span("livekit.agent.job")
+    _root_token = otel_context.attach(otel_trace.set_span_in_context(_root_span))
+
     logger.info("Starting Rox Conductor entrypoint")
     langgraph_url = os.getenv("LANGGRAPH_TUTOR_URL")
     logger.info(f"LANGGRAPH_TUTOR_URL environment variable: {langgraph_url}")
@@ -1945,8 +2002,24 @@ async def entrypoint(ctx: JobContext):
     try:
         await ctx.connect()
         logger.info(f"Successfully connected to LiveKit room '{ctx.room.name}'")
+        # Annotate root span with useful room/participant attributes
+        try:
+            if getattr(ctx, "room", None):
+                _root_span.set_attribute("livekit.room.name", getattr(ctx.room, "name", None))
+                _root_span.set_attribute("livekit.room.sid", getattr(ctx.room, "sid", None))
+                lp = getattr(ctx.room, "local_participant", None)
+                if lp:
+                    _root_span.set_attribute("livekit.participant.identity", getattr(lp, "identity", None))
+                    _root_span.set_attribute("livekit.participant.sid", getattr(lp, "sid", None))
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Failed to connect to LiveKit room: {e}", exc_info=True)
+        try:
+            otel_context.detach(_root_token)
+            _root_span.end()
+        except Exception:
+            pass
         return
 
     # Create the Conductor instance
@@ -2076,6 +2149,55 @@ async def entrypoint(ctx: JobContext):
 
     ctx.room.on("participant_connected", _cancel_no_show_on_connect)
 
+    # Queue session start when participant connects to avoid race if proactive check misses join
+    def _on_participant_connected_start(participant: rtc.RemoteParticipant):
+        try:
+            pid = getattr(participant, "identity", None)
+
+            async def _do_queue():
+                try:
+                    # Set caller identity if not already set, prefer non-browser participants
+                    if (
+                        not rox_agent_instance.caller_identity
+                        and pid
+                        and not str(pid).startswith("browser-bot-")
+                    ):
+                        rox_agent_instance.caller_identity = pid
+                        logger.info(
+                            f"[AUTO] caller_identity set on connect to {pid} (non-browser)"
+                        )
+
+                    # Always enqueue a start task on connect to nudge the loop after refresh.
+                    # Mark reconnect when session already started to allow idempotent handling downstream.
+                    initial_task = {
+                        "task_name": "start_tutoring_session",
+                        "caller_identity": rox_agent_instance.caller_identity or pid,
+                    }
+                    if rox_agent_instance._session_started:
+                        initial_task["reconnect"] = True
+                        logger.info("[AUTO] Queued reconnect start task on participant_connected")
+                    else:
+                        logger.info("[AUTO] Queued session start task on participant_connected")
+
+                    await rox_agent_instance._processing_queue.put(initial_task)
+
+                    # Only set the started flag the first time
+                    if not rox_agent_instance._session_started:
+                        rox_agent_instance._session_started = True
+                except Exception:
+                    logger.debug(
+                        "[AUTO] failed queuing start task on participant_connected",
+                        exc_info=True,
+                    )
+
+            asyncio.create_task(_do_queue())
+        except Exception:
+            logger.debug(
+                "[AUTO] participant_connected start handler error", exc_info=True
+            )
+
+    ctx.room.on("participant_connected", _on_participant_connected_start)
+
     # --- NEW: Read metadata from the token and populate agent state ---
     try:
         local_participant = ctx.room.local_participant
@@ -2099,6 +2221,11 @@ async def entrypoint(ctx: JobContext):
             logger.error(
                 f"CRITICAL: Missing user_id or curriculum_id in metadata. Agent cannot function."
             )
+            try:
+                otel_context.detach(_root_token)
+                _root_span.end()
+            except Exception:
+                pass
             return
 
         rox_agent_instance.current_lo_id = metadata.get("current_lo_id")
@@ -2186,7 +2313,7 @@ async def entrypoint(ctx: JobContext):
                         ctx.room,
                         browser_identity,
                         "browser_navigate",
-                        {"url": "https://www.example.com"},
+                        {""},
                     )
                     rox_agent_instance._initial_nav_sent = True
                     logger.info(
@@ -2324,6 +2451,11 @@ async def entrypoint(ctx: JobContext):
 
     except Exception as e:
         logger.error(f"Failed to register RPC handlers: {e}", exc_info=True)
+        try:
+            otel_context.detach(_root_token)
+            _root_span.end()
+        except Exception:
+            pass
         return  # Cannot continue without RPC handlers
 
     # --- Send Agent Ready Handshake ---
@@ -2332,11 +2464,14 @@ async def entrypoint(ctx: JobContext):
         await asyncio.sleep(1)
 
         if len(ctx.room.remote_participants) > 0:
-            first_participant_identity = list(ctx.room.remote_participants.keys())[0]
-            rox_agent_instance.caller_identity = first_participant_identity
+            all_identities = list(ctx.room.remote_participants.keys())
+            # Prefer non-browser participants for caller identity
+            non_browser = [i for i in all_identities if not str(i).startswith("browser-bot-")]
+            selected_identity = (non_browser[0] if non_browser else all_identities[0])
+            rox_agent_instance.caller_identity = selected_identity
 
             logger.info(
-                f"First participant joined: {first_participant_identity}. Sending 'agent_ready' handshake."
+                f"Participant selected: {selected_identity}. Sending 'agent_ready' handshake."
             )
 
             handshake_payload = json.dumps(
@@ -2348,9 +2483,9 @@ async def entrypoint(ctx: JobContext):
 
             await ctx.room.local_participant.publish_data(
                 payload=handshake_payload,
-                destination_identities=[first_participant_identity],
+                destination_identities=[selected_identity],
             )
-            logger.info(f"Sent 'agent_ready' to {first_participant_identity}")
+            logger.info(f"Sent 'agent_ready' to {selected_identity}")
         else:
             logger.warning(
                 "No participants in room after 1s, skipping initial handshake"
@@ -2360,6 +2495,52 @@ async def entrypoint(ctx: JobContext):
         logger.error(f"Failed to send 'agent_ready' handshake: {e}", exc_info=True)
     logger.info(f"Number of remote participants: {len(ctx.room.remote_participants)}")
     logger.info(f"Participant identities: {list(ctx.room.remote_participants.keys())}")
+
+    # --- Handshake watcher: keep sending 'agent_ready' to newly joined students ---
+    handshaken_identities: set[str] = set()
+    try:
+        # Record the one we just handshook (if any)
+        if 'selected_identity' in locals():
+            handshaken_identities.add(selected_identity)
+    except Exception:
+        pass
+
+    async def _handshake_watcher():
+        try:
+            while True:
+                try:
+                    # Snapshot of remote participants
+                    rp = getattr(ctx.room, "remote_participants", {})
+                    if isinstance(rp, dict):
+                        for pid in list(rp.keys()):
+                            if str(pid).startswith("browser-bot-"):
+                                continue
+                            if pid not in handshaken_identities:
+                                try:
+                                    payload = json.dumps({
+                                        "type": "agent_ready",
+                                        "agent_identity": ctx.room.local_participant.identity,
+                                    })
+                                    await ctx.room.local_participant.publish_data(
+                                        payload=payload,
+                                        destination_identities=[pid],
+                                    )
+                                    handshaken_identities.add(pid)
+                                    # Update caller_identity to the most recent student
+                                    rox_agent_instance.caller_identity = pid
+                                    logger.info(f"Sent 'agent_ready' (watcher) to {pid}")
+                                except Exception:
+                                    logger.debug("Failed to send 'agent_ready' in watcher (non-fatal)", exc_info=True)
+                    await asyncio.sleep(1.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug("Handshake watcher loop error (non-fatal)", exc_info=True)
+                    await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            logger.info("Handshake watcher cancelled")
+
+    handshake_task = asyncio.create_task(_handshake_watcher())
     logger.info(
         "Conductor fully operational. Starting processing loop and agent session..."
     )
@@ -2416,12 +2597,31 @@ async def entrypoint(ctx: JobContext):
     # Keep the agent alive by waiting for the processing task
     await processing_task
 
+    # Close the root span and detach context once the job ends
+    try:
+        try:
+            handshake_task.cancel()
+            with contextlib.suppress(Exception):
+                await handshake_task
+        except Exception:
+            pass
+        otel_context.detach(_root_token)
+        _root_span.end()
+    except Exception:
+        pass
+
 
 # FastAPI application instance for HTTP service mode
 app = FastAPI(
     title="Rox Agent Service", description="Unified LiveKit Agent and HTTP API"
 )
 
+# Instrument the FastAPI app with OpenTelemetry
+try:
+    FastAPIInstrumentor.instrument_app(app)
+    logger.info("FastAPI app has been instrumented for OpenTelemetry.")
+except Exception as e:
+    logger.error(f"Failed to instrument FastAPI app: {e}")
 
 @app.get("/")
 def read_root():

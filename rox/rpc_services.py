@@ -46,12 +46,20 @@ class AgentInteractionService:
             Base64-encoded protobuf response
         """
         logger.info("[RPC] Received student_wants_to_interrupt")
+        # Ensure subsequent UI RPCs target the student's frontend (not the browser pod)
+        try:
+            pid = getattr(raw_payload, 'caller_identity', None)
+            if self.agent and pid and not str(pid).startswith("browser-bot-"):
+                self.agent.caller_identity = pid
+                logger.info(f"[RPC] caller_identity set to {pid} (from student_wants_to_interrupt)")
+        except Exception:
+            pass
         
         try:
-            # Immediate local acknowledgement: stop TTS and enable mic
+            # Immediate local acknowledgement: speak quick ack, stop TTS, and enable mic
             if self.agent:
                 try:
-                    await self.agent.optimistic_interrupt_ack("Mic enabled. You may speak now.")
+                    await self.agent.optimistic_interrupt_ack("Yes — go ahead, what's your doubt?")
                 except Exception as e:
                     logger.warning(f"Optimistic interrupt ack failed (continuing): {e}")
 
@@ -90,6 +98,14 @@ class AgentInteractionService:
         """
         logger.info("[RPC] Received InvokeAgentTask")
         try:
+            # Update caller identity when tasks originate from the student's frontend
+            try:
+                pid = getattr(raw_payload, 'caller_identity', None)
+                if self.agent and pid and not str(pid).startswith("browser-bot-"):
+                    self.agent.caller_identity = pid
+                    logger.info(f"[RPC] caller_identity set to {pid} (from InvokeAgentTask)")
+            except Exception:
+                pass
             # Decode protobuf request from base64
             try:
                 req_bytes = base64.b64decode(raw_payload.payload)
@@ -182,12 +198,20 @@ class AgentInteractionService:
             Base64-encoded protobuf response
         """
         logger.info("[RPC] Received student_mic_button_interrupt")
+        # Ensure subsequent UI RPCs target the student's frontend (not the browser pod)
+        try:
+            pid = getattr(raw_payload, 'caller_identity', None)
+            if self.agent and pid and not str(pid).startswith("browser-bot-"):
+                self.agent.caller_identity = pid
+                logger.info(f"[RPC] caller_identity set to {pid} (from student_mic_button_interrupt)")
+        except Exception:
+            pass
         
         try:
-            # Immediate local acknowledgement: stop TTS and enable mic on UI
+            # Immediate local acknowledgement: speak quick ack, stop TTS, and enable mic on UI
             if self.agent:
                 try:
-                    await self.agent.optimistic_interrupt_ack("Mic enabled. You may speak now.")
+                    await self.agent.optimistic_interrupt_ack("Yes — go ahead, what's your doubt?")
                 except Exception as e:
                     logger.warning(f"Optimistic interrupt ack failed (continuing): {e}")
 
@@ -290,6 +314,14 @@ class AgentInteractionService:
             Base64-encoded protobuf response
         """
         logger.info("[RPC] Received TestPing")
+        # Ensure subsequent UI RPCs target the student's frontend (not the browser pod)
+        try:
+            pid = getattr(raw_payload, 'caller_identity', None)
+            if self.agent and pid and not str(pid).startswith("browser-bot-"):
+                self.agent.caller_identity = pid
+                logger.info(f"[RPC] caller_identity set to {pid} (from TestPing)")
+        except Exception:
+            pass
         
         try:
             # Queue session start task to trigger curriculum navigation (prevent duplicates)
@@ -330,6 +362,14 @@ class AgentInteractionService:
             Base64-encoded protobuf response
         """
         logger.info("[RPC] Received student_stopped_listening")
+        # Ensure subsequent UI RPCs target the student's frontend (not the browser pod)
+        try:
+            pid = getattr(raw_payload, 'caller_identity', None)
+            if self.agent and pid and not str(pid).startswith("browser-bot-"):
+                self.agent.caller_identity = pid
+                logger.info(f"[RPC] caller_identity set to {pid} (from student_stopped_listening)")
+        except Exception:
+            pass
         
         try:
             # Process any pending transcript and disable mic state

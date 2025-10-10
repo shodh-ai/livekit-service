@@ -36,3 +36,4 @@ opentelemetry-instrumentation-fastapi==0.47b0
 opentelemetry-instrumentation-aiohttp-client==0.47b0
 opentelemetry-instrumentation-logging==0.47b0
 opentelemetry-semantic-conventions==0.47b0
+opentelemetry-instrumentation-httpx==0.47b0
