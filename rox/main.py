@@ -284,6 +284,9 @@ class RoxAgent(Agent):
         self._interruption_pending: bool = False
         self._current_execution_cancelled: bool = False
         self._session_started: bool = False
+        # Ensure we enqueue the initial start task only once per agent lifetime
+        self._start_task_enqueued: bool = False
+        self._start_task_enqueued_at: Optional[float] = None
 
         # Plan pause/resume state
         self._current_delivery_plan: Optional[List[Dict]] = None
@@ -362,6 +365,19 @@ class RoxAgent(Agent):
 
                 # --- Handle special local tasks that don't need LangGraph ---
                 task_name = task.get("task_name")
+
+                # Early de-dupe: avoid invoking Brain multiple times for session start
+                if task_name == "start_tutoring_session":
+                    if self._session_started:
+                        # If we've already started, skip duplicate starts (incl. reconnect nudges)
+                        if task.get("reconnect"):
+                            logger.info("[AUTO] Reconnect start task received - skipping Brain invocation")
+                        else:
+                            logger.info("[AUTO] Duplicate start_tutoring_session - skipping Brain invocation")
+                        self._processing_queue.task_done()
+                        continue
+                    # Mark session as started as soon as we see the first start task
+                    self._session_started = True
 
                 # On session start, proactively instruct the browser pod to navigate to example.com
                 if task_name == "start_tutoring_session":
@@ -636,935 +652,583 @@ class RoxAgent(Agent):
         """The Unified Action Executor.
 
         Performs the script from the Brain by executing each action in sequence.
-        This is where the AI's decisions are translated into real actions.
-
-        Args:
-            toolbelt: List of actions to execute, each with tool_name and parameters
+        Slow, non-critical visual actions are run in the background to prioritize speech.
         """
         logger.info(f"Executing toolbelt with {len(toolbelt)} actions")
 
-        # Pre-process to combine consecutive speak actions for smoother TTS
         optimized_toolbelt = self._optimize_speech_actions(toolbelt)
-        # Store current plan for potential pause/resume
         self._current_delivery_plan = list(optimized_toolbelt)
 
+        NON_BLOCKING_TOOLS = {
+            "display_visual_aid",
+            "add_excalidraw_block",
+            "update_excalidraw_block",
+        }
+
         for i, action in enumerate(optimized_toolbelt):
-            # Update current index
             self._current_plan_index = i
-            # Respect pause flag
             if self._is_paused:
-                logger.info(
-                    f"Execution paused before action {i+1}/{len(optimized_toolbelt)}"
-                )
+                logger.info(f"Execution paused before action {i+1}/{len(optimized_toolbelt)}")
                 return
-            # Check for interruption before each action
             if self._current_execution_cancelled:
-                logger.info(
-                    f"Execution cancelled due to interruption. Stopping at action {i+1}/{len(toolbelt)}"
-                )
-                self._current_execution_cancelled = False  # Reset for next execution
+                logger.info(f"Execution cancelled due to interruption. Stopping at action {i+1}/{len(toolbelt)}")
+                self._current_execution_cancelled = False
                 return
 
             tool_name = action.get("tool_name")
             parameters = action.get("parameters", {})
-
-            logger.info(f"Executing action {i+1}/{len(toolbelt)}: {tool_name}")
+            logger.info(f"Dispatching action {i+1}/{len(optimized_toolbelt)}: {tool_name}")
 
             try:
-                if tool_name == "set_ui_state":
-                    # Change the UI state (e.g., switch to drawing mode)
-                    if self._frontend_client:
-                        await self._frontend_client.set_ui_state(
-                            self._room, self.caller_identity, parameters
-                        )
-                    else:
-                        logger.info(
-                            f"Frontend client not available - would set UI state: {parameters}"
-                        )
+                coro = self._execute_single_action(tool_name, parameters)
+                if tool_name in NON_BLOCKING_TOOLS:
+                    asyncio.create_task(coro)
+                    logger.info(f"Started non-blocking action '{tool_name}' in background.")
+                    continue
 
-                elif tool_name == "trigger_rrweb_replay":
-                    # Trigger rrweb replay on the frontend via RPC.
-                    # Transform GCS URLs to use the one-backend proxy endpoint for persistent access.
-                    raw_url = str(parameters.get("events_url", "") or "")
-                    asset_id = None
-                    
+                result = await coro
+                if isinstance(result, tuple) and len(result) == 2:
+                    control, value = result
+                    if control == "break":
+                        break
+                    if control == "return":
+                        return value
+            except Exception as e:
+                logger.error(f"Blocking action '{tool_name}' failed: {e}", exc_info=True)
+
+    async def _execute_single_action(self, tool_name: str, parameters: Dict[str, Any]):
+        """Execute prioritized actions used by early-dispatch.
+        Currently supports: speak/speak_text, display_visual_aid,
+        add_excalidraw_block, update_excalidraw_block.
+        """
+        try:
+            if tool_name in ("speak", "speak_text"):
+                text = parameters.get("text", "")
+                cleaned_text = text.strip()
+
+                if cleaned_text and self.agent_session:
                     try:
-                        # Extract asset_id from various URL formats
-                        if raw_url.startswith("gs://"):
-                            # gs://bucket/path/to/file.json -> path/to/file.json
-                            without = raw_url[5:]
-                            parts = without.split("/", 1)
-                            if len(parts) == 2:
-                                asset_id = parts[1]  # Skip bucket name
-                        elif "storage.googleapis.com/" in raw_url:
-                            # https://storage.googleapis.com/bucket/path/to/file.json -> path/to/file.json
-                            try:
-                                after = raw_url.split("storage.googleapis.com/", 1)[1]
-                                parts = after.split("/", 1)
-                                if len(parts) == 2:
-                                    asset_id = parts[1]  # Skip bucket name
-                            except Exception:
-                                pass
-                        else:
-                            # Assume it's already just the asset_id
-                            asset_id = raw_url
-                        
-                        # Construct proxy URL through one-backend
-                        backend_url = os.getenv("ONE_BACKEND_URL", "http://localhost:3001")
-                        proxy_url = f"{backend_url.rstrip('/')}/api/assets/rrweb/{asset_id}"
-                        logger.info(f"Transformed rrweb URL to proxy: {raw_url} -> {proxy_url}")
-                        
-                    except Exception as e:
-                        logger.warning(f"Failed to transform rrweb URL, using raw: {e}")
-                        proxy_url = raw_url
-
-                    if self._frontend_client:
-                        ok = await self._frontend_client.trigger_rrweb_replay(self._room, self.caller_identity, proxy_url)
-                        if ok:
-                            logger.info("Dispatched RRWEB_REPLAY to frontend")
-                        else:
-                            logger.error("Frontend RPC returned failure for RRWEB_REPLAY")
-                    else:
-                        logger.warning("Frontend client not available - would trigger rrweb replay")
-
-                elif tool_name == "speak" or tool_name == "speak_text":
-                    text = parameters.get("text", "")
-                    if text and self.agent_session:
-                        try:
-                            # Clean the text to prevent TTS artifacts
-                            cleaned_text = text.strip()
-                            if not cleaned_text:
-                                logger.warning(
-                                    "Empty text after cleaning, skipping TTS"
-                                )
-                                continue
-
-                            # 1. Get the handle for the playback with improved settings
-                            logger.info(f"Starting TTS for: {cleaned_text[:50]}...")
-
-                            # Add small delay to prevent connection issues
-                            await asyncio.sleep(0.1)
-
-                            # Ensure any prior playback (e.g., ack) is stopped before new TTS
-                            try:
-                                self.agent_session.interrupt()
-                            except RuntimeError:
-                                pass
-
+                        async def speak_operation():
                             playback_handle = await self.agent_session.say(
                                 cleaned_text, allow_interruptions=True
                             )
-                            logger.info(
-                                f"TTS started successfully: {cleaned_text[:50]}..."
-                            )
+                            await playback_handle
 
-                            # 2. Wait for this specific playback to complete with shorter timeout
-                            # Use the correct LiveKit API - await the handle directly
-                            await asyncio.wait_for(playback_handle, timeout=20.0)
-                            logger.info("TTS completed successfully.")
-
-                            # Add small delay after completion to prevent audio artifacts
-                            await asyncio.sleep(0.2)
-
-                        except asyncio.TimeoutError:
-                            logger.error(
-                                f"TTS timeout after 20s for text: {cleaned_text[:50]}..."
-                            )
-                            # Try to interrupt the playback handle to prevent artifacts
-                            try:
-                                if "playback_handle" in locals():
-                                    playback_handle.interrupt()
-                            except:
-                                pass
-                        except Exception as tts_error:
-                            logger.error(
-                                f"TTS error for text '{cleaned_text[:50]}...': {tts_error}"
-                            )
-                            # Continue execution instead of failing completely
-                    else:
-                        logger.warning(
-                            "No text to speak or agent_session not available"
+                        await asyncio.wait_for(speak_operation(), timeout=30.0)
+                        logger.info(f"TTS completed for: {cleaned_text[:50]}...")
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"TTS operation timed out after 30s for: {cleaned_text[:50]}..."
                         )
-
-                elif tool_name == "wait":
-                    # Pause execution for a specified number of milliseconds
-                    ms = parameters.get("ms") or parameters.get("milliseconds") or 0
-                    try:
-                        ms_val = float(ms)
-                    except Exception:
-                        ms_val = 0.0
-                    # Clamp to a sane maximum (10 minutes)
-                    ms_val = max(0.0, min(ms_val, 600000.0))
-                    logger.info(f"[WAIT] Sleeping for {ms_val} ms before next action...")
-                    await asyncio.sleep(ms_val / 1000.0)
-
-                elif tool_name == "draw":
-                    # Execute drawing on the frontend
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
+                        try:
+                            self.agent_session.interrupt()
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logger.error(
+                            f"TTS operation failed for '{cleaned_text[:50]}...': {e}",
+                            exc_info=True,
                         )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would execute {tool_name} with parameters: {parameters}"
-                        )
+                else:
+                    logger.warning("No text to speak or agent_session not available")
 
-                elif tool_name in [
-                    "browser_navigate",
-                    "browser_click",
-                    "browser_type",
-                    "jupyter_type_in_cell",
-                    "jupyter_run_cell",
-                    "setup_jupyter",
-                    "vscode_add_line",
-                    "vscode_delete_line",
-                    "vscode_run_terminal_command",
-                    "vscode_highlight_add",
-                    "vscode_highlight_remove",
-                    "vscode_create_file", # Create a file in the vscode workspace
-                ]:
-                    # Send commands to the browser pod over LiveKit data channel
-                    browser_pod_identity = (
-                        f"browser-bot-{self.session_id}" if self.session_id else None
+            # --- UI state ---
+            elif tool_name == "set_ui_state":
+                if self._frontend_client:
+                    await self._frontend_client.set_ui_state(
+                        self._room, self.caller_identity, parameters
                     )
-                    if self._browser_pod_client and self._room and browser_pod_identity:
-                        try:
-                            await self._browser_pod_client.send_browser_command(
-                                self._room,
-                                browser_pod_identity,
-                                tool_name,
-                                parameters,
-                            )
-                            logger.info(
-                                f"Sent {tool_name} to browser pod {browser_pod_identity}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to send {tool_name} to browser pod: {e}"
-                            )
-                    else:
-                        logger.warning(
-                            "Browser Pod client or room/session_id not available; cannot send browser action"
-                        )
+                else:
+                    logger.info(
+                        f"Frontend client not available - would set UI state: {parameters}"
+                    )
 
-                # --- Advanced Jupyter Notebook Actions (Script Player Support) ---
-                elif tool_name == "jupyter_type_in_cell":
-                    # Type code into a specific Jupyter cell
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would execute {tool_name} with parameters: {parameters}"
-                        )
+            # --- Wait ---
+            elif tool_name == "wait":
+                ms = parameters.get("ms") or parameters.get("milliseconds") or 0
+                try:
+                    ms_val = float(ms)
+                except Exception:
+                    ms_val = 0.0
+                ms_val = max(0.0, min(ms_val, 600000.0))
+                logger.info(f"[WAIT] Sleeping for {ms_val} ms before next action...")
+                await asyncio.sleep(ms_val / 1000.0)
 
-                elif tool_name == "jupyter_run_cell":
-                    # Run a specific Jupyter cell
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would execute {tool_name} with parameters: {parameters}"
-                        )
+            # --- Draw ---
+            elif tool_name == "draw":
+                if self._frontend_client:
+                    await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                else:
+                    logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
 
-                elif tool_name == "jupyter_create_new_cell":
-                    # Create a new Jupyter cell
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would execute {tool_name} with parameters: {parameters}"
-                        )
-
-                elif tool_name == "jupyter_scroll_to_cell":
-                    # Scroll to a specific Jupyter cell
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would execute {tool_name} with parameters: {parameters}"
-                        )
-
-                elif tool_name == "jupyter_click_pyodide":
-                    # Click on Pyodide kernel option in Jupyter
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would execute {tool_name} with parameters: {parameters}"
-                        )
-
-                elif tool_name == "setup_jupyter":
-                    # Setup Jupyter environment (navigate, select kernel, upload files)
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would execute {tool_name} with parameters: {parameters}"
-                        )
-
-                elif tool_name == "highlight_cell_for_doubt_resolution":
-                    # Highlight a specific Jupyter cell for doubt resolution
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would execute {tool_name} with parameters: {parameters}"
-                        )
-
-                elif tool_name == "clear_all_annotations":
-                    # Clear all visual annotations
-                    if self._frontend_client:
-                        await self._frontend_client.clear_all_annotations(
-                            self._room, self.caller_identity
-                        )
-                        logger.info("Cleared all annotations")
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would clear all annotations"
-                        )
-
-                # --- NEW FRONTEND VOCABULARY TOOLS ---
-                elif tool_name == "display_visual_aid":
-                    # Failsafe: validate/sanitize params before forwarding to frontend/Visualizer
-                    if self._frontend_client:
-                        try:
-                            raw_params = parameters or {}
-                            topic_context = str(
-                                raw_params.get("topic_context", "") or ""
-                            ).strip()
-
-                            # Accept either 'text_to_visualize' or legacy 'prompt'
-                            raw_prompt = raw_params.get("text_to_visualize")
-                            if raw_prompt is None:
-                                raw_prompt = raw_params.get("prompt")
-
-                            # Normalize prompt to string
-                            if raw_prompt is None:
-                                prompt = ""
-                            elif isinstance(raw_prompt, (dict, list)):
-                                # Defensive: stringify complex objects
-                                prompt = json.dumps(raw_prompt, ensure_ascii=False)
-                            else:
-                                prompt = str(raw_prompt)
-
-                            prompt = prompt.strip()
-
-                            # Basic semantic validation: must contain at least one alphanumeric
-                            def _has_meaningful_text(s: str) -> bool:
-                                return any(ch.isalnum() for ch in s)
-
-                            if not prompt or not _has_meaningful_text(prompt):
-                                warn_msg = "Unable to generate a diagram: empty or non-meaningful prompt."
-                                logger.warning(
-                                    f"[display_visual_aid] {warn_msg} params={raw_params}"
-                                )
-                                # Notify user on frontend and skip
-                                await self._frontend_client.show_feedback(
-                                    self._room,
-                                    self.caller_identity,
-                                    feedback_type="error",
-                                    message=warn_msg,
-                                    duration_ms=5000,
-                                )
-                                continue
-
-                            # Truncate overly long prompts to protect downstream services
-                            MAX_PROMPT_LEN = 8000
-                            if len(prompt) > MAX_PROMPT_LEN:
-                                logger.info(
-                                    f"[display_visual_aid] Truncating prompt from {len(prompt)} to {MAX_PROMPT_LEN} chars"
-                                )
-                                prompt = prompt[:MAX_PROMPT_LEN]
-
-                            clean_payload = {
-                                "prompt": prompt,
-                                "topic_context": topic_context,
-                            }
-
-                            # Forward to frontend; it will call the Visualizer service
-                            ok = await self._frontend_client.execute_visual_action(
-                                self._room,
-                                self.caller_identity,
-                                "GENERATE_VISUALIZATION",
-                                clean_payload,
-                            )
-                            if ok:
-                                logger.info(
-                                    "[display_visual_aid] Forwarded sanitized prompt to frontend for visualization"
-                                )
-                            else:
-                                logger.error(
-                                    "[display_visual_aid] Frontend RPC returned failure for GENERATE_VISUALIZATION"
-                                )
-                        except Exception as e:
-                            logger.error(
-                                f"[display_visual_aid] Failed to process/forward visualization request: {e}",
-                                exc_info=True,
-                            )
-                            try:
-                                await self._frontend_client.show_feedback(
-                                    self._room,
-                                    self.caller_identity,
-                                    feedback_type="error",
-                                    message="Visualization failed due to an internal error.",
-                                    duration_ms=5000,
-                                )
-                            except Exception:
-                                pass
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would forward display_visual_aid: {parameters}"
-                        )
-
-                # --- Feed/Whiteboard Block Management ---
-                elif tool_name == "add_excalidraw_block":
-                    # Normalize parameters for frontend expectations
-                    raw = parameters or {}
-                    out_params = {}
-                    # id
-                    if raw.get("id"):
-                        out_params["id"] = raw.get("id")
-                    elif raw.get("block_id"):
-                        out_params["id"] = raw.get("block_id")
-                    # summary/title
-                    if raw.get("summary") is not None:
-                        out_params["summary"] = raw.get("summary")
-                    elif raw.get("title") is not None:
-                        out_params["summary"] = raw.get("title")
-                    # elements list or JSON string
-                    elements = raw.get("elements")
-                    if elements is None:
-                        elements = raw.get("initial_elements")
-                    if elements is not None:
-                        out_params["elements"] = elements
-                    if self._frontend_client and self._room and self.caller_identity:
-                        try:
-                            ok = await self._frontend_client.execute_visual_action(
-                                self._room, self.caller_identity, "add_excalidraw_block", out_params
-                            )
-                            if ok:
-                                logger.info("[ADD_BLOCK] Forwarded add_excalidraw_block to frontend")
-                            else:
-                                logger.error("[ADD_BLOCK] Frontend RPC returned failure for ADD_EXCALIDRAW_BLOCK")
-                        except Exception as e:
-                            logger.error(f"[ADD_BLOCK] Failed to forward add_excalidraw_block: {e}", exc_info=True)
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would add_excalidraw_block: {out_params}"
-                        )
-
-                elif tool_name == "update_excalidraw_block":
-                    raw = parameters or {}
-                    out_params = {}
-                    # id / block_id
-                    bid = raw.get("id") or raw.get("block_id") or raw.get("blockId")
-                    if bid:
-                        out_params["id"] = bid
-                    # elements: prefer 'elements', else fall back to 'modifications' from mock brain
-                    elems = raw.get("elements")
-                    if elems is None:
-                        elems = raw.get("modifications")
-                    if elems is not None:
-                        out_params["elements"] = elems
-                    if self._frontend_client and self._room and self.caller_identity:
-                        try:
-                            ok = await self._frontend_client.execute_visual_action(
-                                self._room, self.caller_identity, "update_excalidraw_block", out_params
-                            )
-                            if ok:
-                                logger.info("[UPDATE_BLOCK] Forwarded update_excalidraw_block to frontend")
-                            else:
-                                logger.error("[UPDATE_BLOCK] Frontend RPC returned failure for UPDATE_EXCALIDRAW_BLOCK")
-                        except Exception as e:
-                            logger.error(f"[UPDATE_BLOCK] Failed to forward update_excalidraw_block: {e}", exc_info=True)
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would update_excalidraw_block: {out_params}"
-                        )
-
-                elif tool_name == "focus_on_block":
-                    raw = parameters or {}
-                    out_params = {}
-                    bid = raw.get("id") or raw.get("block_id") or raw.get("blockId")
-                    if bid:
-                        out_params["id"] = bid
-                    if self._frontend_client and self._room and self.caller_identity:
-                        try:
-                            ok = await self._frontend_client.execute_visual_action(
-                                self._room, self.caller_identity, "focus_on_block", out_params
-                            )
-                            if ok:
-                                logger.info("[FOCUS_BLOCK] Forwarded focus_on_block to frontend")
-                            else:
-                                logger.error("[FOCUS_BLOCK] Frontend RPC returned failure for FOCUS_ON_BLOCK")
-                        except Exception as e:
-                            logger.error(f"[FOCUS_BLOCK] Failed to forward focus_on_block: {e}", exc_info=True)
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would focus_on_block: {out_params}"
-                        )
-
-                elif tool_name == "highlight_elements":
-                    # Highlight specific UI elements -> HIGHLIGHT_TEXT_RANGES
-                    if self._frontend_client:
-                        await self._frontend_client.highlight_elements(
-                            self._room,
-                            self.caller_identity,
-                            element_ids=parameters.get("element_ids", []),
-                            highlight_type=parameters.get(
-                                "highlight_type", "attention"
-                            ),
-                            duration_ms=parameters.get("duration_ms", 3000),
-                        )
-                        logger.info(
-                            f"Highlighted elements: {parameters.get('element_ids', [])}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would highlight elements: {parameters.get('element_ids', [])}"
-                        )
-
-                elif tool_name == "give_student_control":
-                    # Transfer control to student with message
-                    if self._frontend_client:
-                        await self._frontend_client.give_student_control(
-                            self._room,
-                            self.caller_identity,
-                            message=parameters.get("message", ""),
-                        )
-                        logger.info(
-                            f"Gave student control: {parameters.get('message', '')}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would give student control: {parameters.get('message', '')}"
-                        )
-
-                elif tool_name == "take_ai_control":
-                    # AI regains control with message
-                    if self._frontend_client:
-                        await self._frontend_client.take_ai_control(
-                            self._room,
-                            self.caller_identity,
-                            message=parameters.get("message", ""),
-                        )
-                        logger.info(f"AI took control: {parameters.get('message', '')}")
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would take AI control: {parameters.get('message', '')}"
-                        )
-
-                elif tool_name == "show_feedback":
-                    # Show feedback message to student
-                    if self._frontend_client:
-                        await self._frontend_client.show_feedback(
-                            self._room,
-                            self.caller_identity,
-                            message=parameters.get("message", ""),
-                            feedback_type=parameters.get("type", "info"),
-                            duration_ms=parameters.get("duration_ms", 5000),
-                        )
-                        logger.info(f"Showed feedback: {parameters.get('message', '')}")
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would show feedback: {parameters.get('message', '')}"
-                        )
-
-                elif tool_name in [
-                    "suggested_responses",
-                    "show_suggested_responses",
-                    "SUGGESTED_RESPONSES",
-                ]:
-                    # Emit quick reply suggestions to the frontend
-                    if self._frontend_client:
-                        try:
-                            ok = await self._frontend_client.send_suggested_responses(
-                                self._room,
-                                self.caller_identity,
-                                suggestions=parameters.get("suggestions"),
-                                title=parameters.get("title")
-                                or parameters.get("prompt"),
-                                group_id=parameters.get("group_id"),
-                                responses=parameters.get("responses"),
-                            )
-                            if ok:
-                                logger.info(
-                                    f"Sent suggested responses: title={parameters.get('title') or parameters.get('prompt')}, count={len(parameters.get('suggestions') or parameters.get('responses') or [])}"
-                                )
-                            else:
-                                logger.error(
-                                    "Frontend RPC returned failure for SUGGESTED_RESPONSES"
-                                )
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to send suggested responses: {e}",
-                                exc_info=True,
-                            )
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would send suggested responses"
-                        )
-
-                elif tool_name == "listen":
-                    logger.info("Preparing to listen, adding a pre-listen delay...")
-                    await asyncio.sleep(0.2)  # 200ms pre-listen buffer
-                    # Set expectation state to wait for interruptions
-                    self._expected_user_input_type = "INTERRUPTION"
-                    logger.info("State of Expectation set to: INTERRUPTION")
-
-                    # Also enable microphone in frontend to allow student to speak
-                    if self._frontend_client:
-                        now = time.time()
-                        if self._last_mic_enable_ts is None or (now - self._last_mic_enable_ts) > MIC_ENABLE_DEBOUNCE_SEC:
-                            await self._frontend_client.set_mic_enabled(
-                                self._room,
-                                self.caller_identity,
-                                True,
-                                message="You may speak now...",
-                            )
-                            self._last_mic_enable_ts = now
-                            logger.info("[LISTEN] Enabled microphone for student input")
-                        else:
-                            logger.info(
-                                f"[LISTEN] Skipping mic enable due to debounce (dt={(now - self._last_mic_enable_ts):.3f}s)"
-                            )
-                    else:
-                        logger.warning(
-                            "[LISTEN] Frontend client not available - microphone not enabled"
-                        )
-
-                elif tool_name == "START_LISTENING_VISUAL":
-                    # Enable microphone via frontend RPC
-                    if self._frontend_client:
-                        logger.info(
-                            f"[START_LISTENING_VISUAL] Attempting to enable mic for caller_identity: {self.caller_identity}"
-                        )
-                        now = time.time()
-                        if self._last_mic_enable_ts is None or (now - self._last_mic_enable_ts) > MIC_ENABLE_DEBOUNCE_SEC:
-                            success = await self._frontend_client.set_mic_enabled(
-                                self._room,
-                                self.caller_identity,
-                                True,
-                                message=parameters.get("message", ""),
-                            )
-                            if success:
-                                self._last_mic_enable_ts = now
-                                logger.info(
-                                    f"[START_LISTENING_VISUAL] Successfully enabled microphone: {parameters.get('message', '')}"
-                                )
-                            else:
-                                logger.error(
-                                    f"[START_LISTENING_VISUAL] Failed to enable microphone via RPC. caller_identity: {self.caller_identity}, room: {self._room is not None}"
-                                )
-                        else:
-                            logger.info(
-                                f"[START_LISTENING_VISUAL] Skipping mic enable due to debounce (dt={(now - self._last_mic_enable_ts):.3f}s)"
-                            )
-                    else:
-                        logger.warning(
-                            f"[START_LISTENING_VISUAL] Frontend client not available - would enable mic: {parameters.get('message', '')}"
-                        )
-
-                elif tool_name == "STOP_LISTENING_VISUAL":
-                    # Disable microphone via frontend RPC
-                    if self._frontend_client:
-                        await self._frontend_client.set_mic_enabled(
-                            self._room,
-                            self.caller_identity,
-                            False,
-                            message=parameters.get("message", ""),
-                        )
-                        logger.info(
-                            f"Disabled microphone: {parameters.get('message', '')}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would disable mic: {parameters.get('message', '')}"
-                        )
-
-                elif tool_name == "prompt_for_student_action":
-                    # Prompt student and wait for specific submission
-                    prompt_text = parameters.get("prompt_text", "")
-                    if prompt_text and self.agent_session:
-                        await self.agent_session.say(
-                            text=prompt_text, allow_interruptions=True
-                        )
-
-                    self._expected_user_input_type = "SUBMISSION"
-                    logger.info("State of Expectation set to: SUBMISSION")
-
-                    # The AI's turn is over - wait for student submission
-                    break
-
-                # --- EXCALIDRAW CANVAS ACTIONS ---
-                elif tool_name == "clear_canvas":
-                    # Clear all elements from Excalidraw canvas
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                        logger.info("Cleared Excalidraw canvas")
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would clear canvas"
-                        )
-
-                elif tool_name == "update_elements":
-                    # Update existing elements on canvas
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                        logger.info(
-                            f"Updated canvas elements: {len(parameters.get('elements', []))} elements"
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would update elements: {parameters}"
-                        )
-
-                elif tool_name == "remove_highlighting":
-                    # Remove all highlighting from canvas
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                        logger.info("Removed canvas highlighting")
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would remove highlighting"
-                        )
-
-                elif tool_name == "highlight_elements_advanced":
-                    # Advanced highlighting with custom options
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                        logger.info(f"Advanced highlighting: {parameters}")
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would do advanced highlighting: {parameters}"
-                        )
-
-                elif tool_name == "modify_elements":
-                    # Modify existing canvas elements
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                        logger.info(
-                            f"Modified canvas elements: {len(parameters.get('modifications', []))} modifications"
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would modify elements: {parameters}"
-                        )
-
-                elif tool_name == "capture_screenshot":
-                    # Capture canvas screenshot
-                    if self._frontend_client:
-                        result = await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                        logger.info("Captured canvas screenshot")
-                        return result
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would capture screenshot"
-                        )
-                        return None
-
-                elif tool_name == "get_canvas_elements":
-                    # Get current canvas elements
-                    if self._frontend_client:
-                        result = await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                        logger.info("Retrieved canvas elements")
-                        return result
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would get canvas elements"
-                        )
-                        return []
-
-                elif tool_name == "set_generating":
-                    # Set generating state for UI
-                    if self._frontend_client:
-                        await self._frontend_client.execute_visual_action(
-                            self._room, self.caller_identity, tool_name, parameters
-                        )
-                        logger.info(
-                            f"Set generating state: {parameters.get('generating', False)}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Frontend client not available - would set generating: {parameters}"
-                        )
-
-                elif tool_name == "clear_all_annotations":
-                    # Clear all visual annotations and highlights
-                    if self._frontend_client:
-                        await self._frontend_client.clear_all_annotations(
-                            self._room, self.caller_identity
-                        )
-                        logger.info("Cleared all canvas annotations")
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would clear all annotations"
-                        )
-
-                elif tool_name == "capture_canvas_screenshot":
-                    # Capture screenshot of current canvas state
-                    if self._frontend_client:
-                        # This would need to be implemented in frontend_client.py
-                        logger.info(
-                            "Canvas screenshot capture requested (implementation needed)"
-                        )
-                        # TODO: Implement screenshot capture in frontend_client
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would capture canvas screenshot"
-                        )
-
-                elif tool_name == "trigger_rrweb_replay":
-                    # Trigger rrweb replay on the frontend given a JSON events URL
-                    events_url = parameters.get("events_url")
-                    if self._frontend_client and events_url:
-                        logger.info(f"Triggering rrweb replay for URL: {events_url}")
-                        try:
-                            await self._frontend_client.trigger_rrweb_replay(
-                                self._room, self.caller_identity, events_url=events_url
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to trigger rrweb replay: {e}")
-                    else:
-                        logger.warning(
-                            "Frontend client not available or no events_url provided for rrweb replay."
-                        )
-
-                elif tool_name == "replay_parsed_rrweb_actions":
-                    # NEW: Replay parsed rrweb actions via browser_manager
-                    # This queries Brum for parsed actions and sends them to browser_manager
-                    curriculum_id = parameters.get("curriculum_id")
-                    lo_id = parameters.get("lo_id")
-                    delay_ms = parameters.get("delay_ms", 500)
-                    
-                    if not curriculum_id or not lo_id:
-                        logger.warning("Missing curriculum_id or lo_id for replay_parsed_rrweb_actions")
-                        continue
-                    
-                    logger.info(f"Replaying parsed rrweb actions: curriculum={curriculum_id}, lo={lo_id}")
-                    
+            # --- Browser/VSCode/Jupyter routed to browser pod ---
+            elif tool_name in [
+                "browser_navigate",
+                "browser_click",
+                "browser_type",
+                "jupyter_type_in_cell",
+                "jupyter_run_cell",
+                "setup_jupyter",
+                "vscode_add_line",
+                "vscode_delete_line",
+                "vscode_run_terminal_command",
+                "vscode_highlight_add",
+                "vscode_highlight_remove",
+                "vscode_create_file",
+            ]:
+                browser_pod_identity = f"browser-bot-{self.session_id}" if self.session_id else None
+                if self._browser_pod_client and self._room and browser_pod_identity:
                     try:
-                        # Query Brum for parsed actions
-                        # TODO: Implement Brum query endpoint for parsed actions
-                        # For now, we'll send the query params to browser_manager
-                        # and let it handle the Brum query
-                        
-                        # Find browser-bot participant
+                        await self._browser_pod_client.send_browser_command(
+                            self._room, browser_pod_identity, tool_name, parameters
+                        )
+                        logger.info(f"Sent {tool_name} to browser pod {browser_pod_identity}")
+                    except Exception as e:
+                        logger.error(f"Failed to send {tool_name} to browser pod: {e}")
+                else:
+                    logger.warning("Browser Pod client or room/session_id not available; cannot send browser action")
+
+            # --- Jupyter UI helpers (frontend actions) ---
+            elif tool_name in [
+                "jupyter_create_new_cell",
+                "jupyter_scroll_to_cell",
+                "jupyter_click_pyodide",
+                "setup_jupyter",
+                "highlight_cell_for_doubt_resolution",
+            ]:
+                if self._frontend_client:
+                    await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                else:
+                    logger.warning(f"Frontend client not available - would execute {tool_name} with parameters: {parameters}")
+
+            # --- Annotations/feedback/control ---
+            elif tool_name == "clear_all_annotations":
+                if self._frontend_client:
+                    await self._frontend_client.clear_all_annotations(self._room, self.caller_identity)
+                    logger.info("Cleared all annotations")
+                else:
+                    logger.warning("Frontend client not available - would clear all annotations")
+
+            elif tool_name == "focus_on_block":
+                raw = parameters or {}
+                out_params = {}
+                bid = raw.get("id") or raw.get("block_id") or raw.get("blockId")
+                if bid:
+                    out_params["id"] = bid
+                if self._frontend_client and self._room and self.caller_identity:
+                    try:
+                        ok = await self._frontend_client.execute_visual_action(self._room, self.caller_identity, "focus_on_block", out_params)
+                        if ok:
+                            logger.info("[FOCUS_BLOCK] Forwarded focus_on_block to frontend")
+                        else:
+                            logger.error("[FOCUS_BLOCK] Frontend RPC returned failure for FOCUS_ON_BLOCK")
+                    except Exception as e:
+                        logger.error(f"[FOCUS_BLOCK] Failed to forward focus_on_block: {e}", exc_info=True)
+                else:
+                    logger.warning(f"Frontend client not available - would focus_on_block: {out_params}")
+
+            elif tool_name == "highlight_elements":
+                if self._frontend_client:
+                    await self._frontend_client.highlight_elements(
+                        self._room,
+                        self.caller_identity,
+                        element_ids=parameters.get("element_ids", []),
+                        highlight_type=parameters.get("highlight_type", "attention"),
+                        duration_ms=parameters.get("duration_ms", 3000),
+                    )
+                    logger.info(f"Highlighted elements: {parameters.get('element_ids', [])}")
+                else:
+                    logger.warning(f"Frontend client not available - would highlight elements: {parameters.get('element_ids', [])}")
+
+            elif tool_name == "give_student_control":
+                if self._frontend_client:
+                    await self._frontend_client.give_student_control(self._room, self.caller_identity, message=parameters.get("message", ""))
+                    logger.info(f"Gave student control: {parameters.get('message', '')}")
+                else:
+                    logger.warning(f"Frontend client not available - would give student control: {parameters.get('message', '')}")
+
+            elif tool_name == "take_ai_control":
+                if self._frontend_client:
+                    await self._frontend_client.take_ai_control(self._room, self.caller_identity, message=parameters.get("message", ""))
+                    logger.info(f"AI took control: {parameters.get('message', '')}")
+                else:
+                    logger.warning(f"Frontend client not available - would take AI control: {parameters.get('message', '')}")
+
+            elif tool_name == "show_feedback":
+                if self._frontend_client:
+                    await self._frontend_client.show_feedback(
+                        self._room,
+                        self.caller_identity,
+                        message=parameters.get("message", ""),
+                        feedback_type=parameters.get("type", "info"),
+                        duration_ms=parameters.get("duration_ms", 5000),
+                    )
+                    logger.info(f"Showed feedback: {parameters.get('message', '')}")
+                else:
+                    logger.warning(f"Frontend client not available - would show feedback: {parameters.get('message', '')}")
+
+            elif tool_name in ["suggested_responses", "show_suggested_responses", "SUGGESTED_RESPONSES"]:
+                if self._frontend_client:
+                    try:
+                        ok = await self._frontend_client.send_suggested_responses(
+                            self._room,
+                            self.caller_identity,
+                            suggestions=parameters.get("suggestions"),
+                            title=parameters.get("title") or parameters.get("prompt"),
+                            group_id=parameters.get("group_id"),
+                            responses=parameters.get("responses"),
+                        )
+                        if ok:
+                            logger.info(
+                                f"Sent suggested responses: title={parameters.get('title') or parameters.get('prompt')}, count={len(parameters.get('suggestions') or parameters.get('responses') or [])}"
+                            )
+                        else:
+                            logger.error("Frontend RPC returned failure for SUGGESTED_RESPONSES")
+                    except Exception as e:
+                        logger.error(f"Failed to send suggested responses: {e}", exc_info=True)
+                else:
+                    logger.warning("Frontend client not available - would send suggested responses")
+
+            # --- Listening / mic control ---
+            elif tool_name == "listen":
+                logger.info("Preparing to listen, adding a pre-listen delay...")
+                await asyncio.sleep(0.2)
+                self._expected_user_input_type = "INTERRUPTION"
+                logger.info("State of Expectation set to: INTERRUPTION")
+                if self._frontend_client:
+                    now = time.time()
+                    if self._last_mic_enable_ts is None or (now - self._last_mic_enable_ts) > MIC_ENABLE_DEBOUNCE_SEC:
+                        await self._frontend_client.set_mic_enabled(self._room, self.caller_identity, True, message="You may speak now...")
+                        self._last_mic_enable_ts = now
+                        logger.info("[LISTEN] Enabled microphone for student input")
+                    else:
+                        logger.info(f"[LISTEN] Skipping mic enable due to debounce (dt={(now - self._last_mic_enable_ts):.3f}s)")
+                else:
+                    logger.warning("[LISTEN] Frontend client not available - microphone not enabled")
+
+            elif tool_name == "START_LISTENING_VISUAL":
+                if self._frontend_client:
+                    logger.info(f"[START_LISTENING_VISUAL] Attempting to enable mic for caller_identity: {self.caller_identity}")
+                    now = time.time()
+                    if self._last_mic_enable_ts is None or (now - self._last_mic_enable_ts) > MIC_ENABLE_DEBOUNCE_SEC:
+                        success = await self._frontend_client.set_mic_enabled(self._room, self.caller_identity, True, message=parameters.get("message", ""))
+                        if success:
+                            self._last_mic_enable_ts = now
+                            logger.info(f"[START_LISTENING_VISUAL] Successfully enabled microphone: {parameters.get('message', '')}")
+                        else:
+                            logger.error(f"[START_LISTENING_VISUAL] Failed to enable microphone via RPC. caller_identity: {self.caller_identity}, room: {self._room is not None}")
+                    else:
+                        logger.info(f"[START_LISTENING_VISUAL] Skipping mic enable due to debounce (dt={(now - self._last_mic_enable_ts):.3f}s)")
+                else:
+                    logger.warning(f"[START_LISTENING_VISUAL] Frontend client not available - would enable mic: {parameters.get('message', '')}")
+
+            elif tool_name == "STOP_LISTENING_VISUAL":
+                if self._frontend_client:
+                    await self._frontend_client.set_mic_enabled(self._room, self.caller_identity, False, message=parameters.get("message", ""))
+                    logger.info(f"Disabled microphone: {parameters.get('message', '')}")
+                else:
+                    logger.warning(f"Frontend client not available - would disable mic: {parameters.get('message', '')}")
+
+            elif tool_name == "prompt_for_student_action":
+                prompt_text = parameters.get("prompt_text", "")
+                if prompt_text and self.agent_session:
+                    await self.agent_session.say(text=prompt_text, allow_interruptions=True)
+                self._expected_user_input_type = "SUBMISSION"
+                logger.info("State of Expectation set to: SUBMISSION")
+                return ("break", None)
+
+            # --- Excalidraw canvas actions ---
+            elif tool_name == "clear_canvas":
+                if self._frontend_client:
+                    await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                    logger.info("Cleared Excalidraw canvas")
+                else:
+                    logger.warning("Frontend client not available - would clear canvas")
+
+            elif tool_name == "update_elements":
+                if self._frontend_client:
+                    await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                    logger.info(f"Updated canvas elements: {len(parameters.get('elements', []))} elements")
+                else:
+                    logger.warning(f"Frontend client not available - would update elements: {parameters}")
+
+            elif tool_name == "remove_highlighting":
+                if self._frontend_client:
+                    await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                    logger.info("Removed canvas highlighting")
+                else:
+                    logger.warning("Frontend client not available - would remove highlighting")
+
+            elif tool_name == "highlight_elements_advanced":
+                if self._frontend_client:
+                    await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                    logger.info(f"Advanced highlighting: {parameters}")
+                else:
+                    logger.warning(f"Frontend client not available - would do advanced highlighting: {parameters}")
+
+            elif tool_name == "modify_elements":
+                if self._frontend_client:
+                    await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                    logger.info(f"Modified canvas elements: {len(parameters.get('modifications', []))} modifications")
+                else:
+                    logger.warning(f"Frontend client not available - would modify elements: {parameters}")
+
+            elif tool_name == "capture_screenshot":
+                if self._frontend_client:
+                    result = await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                    logger.info("Captured canvas screenshot")
+                    return ("return", result)
+                else:
+                    logger.warning("Frontend client not available - would capture screenshot")
+                    return ("return", None)
+
+            elif tool_name == "get_canvas_elements":
+                if self._frontend_client:
+                    result = await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                    logger.info("Retrieved canvas elements")
+                    return ("return", result)
+                else:
+                    logger.warning("Frontend client not available - would get canvas elements")
+                    return ("return", [])
+
+            elif tool_name == "set_generating":
+                if self._frontend_client:
+                    await self._frontend_client.execute_visual_action(self._room, self.caller_identity, tool_name, parameters)
+                    logger.info(f"Set generating state: {parameters.get('generating', False)}")
+                else:
+                    logger.warning(f"Frontend client not available - would set generating: {parameters}")
+
+            elif tool_name == "clear_all_annotations":
+                if self._frontend_client:
+                    await self._frontend_client.clear_all_annotations(self._room, self.caller_identity)
+                    logger.info("Cleared all canvas annotations")
+                else:
+                    logger.warning("Frontend client not available - would clear all annotations")
+
+            elif tool_name == "capture_canvas_screenshot":
+                if self._frontend_client:
+                    logger.info("Canvas screenshot capture requested (implementation needed)")
+                    # TODO: Implement screenshot capture in frontend_client
+                else:
+                    logger.warning("Frontend client not available - would capture canvas screenshot")
+
+            # --- Visual generation & blocks (already in NON_BLOCKING set) ---
+            elif tool_name == "display_visual_aid":
+                if self._frontend_client:
+                    try:
+                        raw_params = parameters or {}
+                        topic_context = str(raw_params.get("topic_context", "") or "").strip()
+                        raw_prompt = raw_params.get("text_to_visualize")
+                        if raw_prompt is None:
+                            raw_prompt = raw_params.get("prompt")
+                        if raw_prompt is None:
+                            prompt = ""
+                        elif isinstance(raw_prompt, (dict, list)):
+                            prompt = json.dumps(raw_prompt, ensure_ascii=False)
+                        else:
+                            prompt = str(raw_prompt)
+                        prompt = prompt.strip()
+
+                        def _has_meaningful_text(s: str) -> bool:
+                            return any(ch.isalnum() for ch in s)
+
+                        if not prompt or not _has_meaningful_text(prompt):
+                            warn_msg = (
+                                "Unable to generate a diagram: empty or non-meaningful prompt."
+                            )
+                            logger.warning(
+                                f"[display_visual_aid] {warn_msg} params={raw_params}"
+                            )
+                            await self._frontend_client.show_feedback(
+                                self._room,
+                                self.caller_identity,
+                                feedback_type="error",
+                                message=warn_msg,
+                                duration_ms=5000,
+                            )
+                            return
+
+                        MAX_PROMPT_LEN = 8000
+                        if len(prompt) > MAX_PROMPT_LEN:
+                            logger.info(
+                                f"[display_visual_aid] Truncating prompt from {len(prompt)} to {MAX_PROMPT_LEN} chars"
+                            )
+                            prompt = prompt[:MAX_PROMPT_LEN]
+
+                        clean_payload = {"prompt": prompt, "topic_context": topic_context}
+
+                        ok = await self._frontend_client.execute_visual_action(
+                            self._room,
+                            self.caller_identity,
+                            "GENERATE_VISUALIZATION",
+                            clean_payload,
+                        )
+                        if ok:
+                            logger.info(
+                                "[display_visual_aid] Forwarded sanitized prompt to frontend for visualization"
+                            )
+                        else:
+                            logger.error(
+                                "[display_visual_aid] Frontend RPC returned failure for GENERATE_VISUALIZATION"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"[display_visual_aid] Failed to process/forward visualization request: {e}",
+                            exc_info=True,
+                        )
+                        try:
+                            await self._frontend_client.show_feedback(
+                                self._room,
+                                self.caller_identity,
+                                feedback_type="error",
+                                message="Visualization failed due to an internal error.",
+                                duration_ms=5000,
+                            )
+                        except Exception:
+                            pass
+                else:
+                    logger.warning(
+                        f"Frontend client not available - would forward display_visual_aid: {parameters}"
+                    )
+
+            elif tool_name == "add_excalidraw_block":
+                raw = parameters or {}
+                out_params = {}
+                if raw.get("id"):
+                    out_params["id"] = raw.get("id")
+                elif raw.get("block_id"):
+                    out_params["id"] = raw.get("block_id")
+                if raw.get("summary") is not None:
+                    out_params["summary"] = raw.get("summary")
+                elif raw.get("title") is not None:
+                    out_params["summary"] = raw.get("title")
+                elements = raw.get("elements")
+                if elements is None:
+                    elements = raw.get("initial_elements")
+                if elements is not None:
+                    out_params["elements"] = elements
+                if self._frontend_client and self._room and self.caller_identity:
+                    try:
+                        ok = await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, "add_excalidraw_block", out_params
+                        )
+                        if ok:
+                            logger.info("[ADD_BLOCK] Forwarded add_excalidraw_block to frontend")
+                        else:
+                            logger.error(
+                                "[ADD_BLOCK] Frontend RPC returned failure for ADD_EXCALIDRAW_BLOCK"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"[ADD_BLOCK] Failed to forward add_excalidraw_block: {e}",
+                            exc_info=True,
+                        )
+                else:
+                    logger.warning(
+                        f"Frontend client not available - would add_excalidraw_block: {out_params}"
+                    )
+
+            elif tool_name == "update_excalidraw_block":
+                raw = parameters or {}
+                out_params = {}
+                bid = raw.get("id") or raw.get("block_id") or raw.get("blockId")
+                if bid:
+                    out_params["id"] = bid
+                elems = raw.get("elements")
+                if elems is None:
+                    elems = raw.get("modifications")
+                if elems is not None:
+                    out_params["elements"] = elems
+                if self._frontend_client and self._room and self.caller_identity:
+                    try:
+                        ok = await self._frontend_client.execute_visual_action(
+                            self._room, self.caller_identity, "update_excalidraw_block", out_params
+                        )
+                        if ok:
+                            logger.info(
+                                "[UPDATE_BLOCK] Forwarded update_excalidraw_block to frontend"
+                            )
+                        else:
+                            logger.error(
+                                "[UPDATE_BLOCK] Frontend RPC returned failure for UPDATE_EXCALIDRAW_BLOCK"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"[UPDATE_BLOCK] Failed to forward update_excalidraw_block: {e}",
+                            exc_info=True,
+                        )
+                else:
+                    logger.warning(
+                        f"Frontend client not available - would update_excalidraw_block: {out_params}"
+                    )
+
+            # --- Replay parsed rrweb actions via data channel ---
+            elif tool_name == "replay_parsed_rrweb_actions":
+                curriculum_id = parameters.get("curriculum_id")
+                lo_id = parameters.get("lo_id")
+                delay_ms = parameters.get("delay_ms", 500)
+                if not curriculum_id or not lo_id:
+                    logger.warning("Missing curriculum_id or lo_id for replay_parsed_rrweb_actions")
+                else:
+                    try:
                         browser_identity = None
                         for pid, participant in self._room.remote_participants.items():
                             ident = str(getattr(participant, "identity", "") or pid)
                             if ident.startswith("browser-bot-"):
                                 browser_identity = ident
                                 break
-                        
                         if not browser_identity:
                             logger.warning("No browser-bot participant found for replay_parsed_rrweb_actions")
-                            continue
-                        
-                        # Send command to browser_manager via data channel
-                        command = {
-                            "type": "replay_rrweb_sequence_from_brum",
-                            "curriculum_id": curriculum_id,
-                            "lo_id": lo_id,
-                            "delay_ms": delay_ms
-                        }
-                        
-                        await self._room.local_participant.publish_data(
-                            json.dumps(command).encode('utf-8'),
-                            destination_identities=[browser_identity]
-                        )
-                        
-                        logger.info(f"Sent replay_parsed_rrweb_actions command to {browser_identity}")
-                        
+                        else:
+                            command = {
+                                "type": "replay_rrweb_sequence_from_brum",
+                                "curriculum_id": curriculum_id,
+                                "lo_id": lo_id,
+                                "delay_ms": delay_ms,
+                            }
+                            await self._room.local_participant.publish_data(
+                                json.dumps(command).encode("utf-8"),
+                                destination_identities=[browser_identity],
+                            )
+                            logger.info(f"Sent replay_parsed_rrweb_actions command to {browser_identity}")
                     except Exception as e:
                         logger.error(f"Failed to replay parsed rrweb actions: {e}", exc_info=True)
 
-                elif tool_name == "get_block_content":
-                    # Request content of a whiteboard feed block from the frontend and feed back to LangGraph
-                    block_id = str(parameters.get("block_id") or parameters.get("id") or "").strip()
-                    if not block_id:
-                        logger.warning("[get_block_content] Missing block_id parameter; skipping")
-                        continue
-                    if self._frontend_client and self._room and self.caller_identity:
-                        try:
-                            logger.info(f"[get_block_content] Sending RPC to frontend to fetch block content for ID: {block_id}")
-                            content = await self._frontend_client.get_block_content_from_frontend(
-                                self._room, self.caller_identity, block_id
-                            )
-                            if content is None:
-                                logger.error(f"[get_block_content] Frontend did not return content for ID: {block_id}")
-                                continue
+            # --- Get block content and enqueue follow-up task ---
+            elif tool_name == "get_block_content":
+                block_id = str(parameters.get("block_id") or parameters.get("id") or "").strip()
+                if not block_id:
+                    logger.warning("[get_block_content] Missing block_id parameter; skipping")
+                elif self._frontend_client and self._room and self.caller_identity:
+                    try:
+                        logger.info(f"[get_block_content] Sending RPC to frontend to fetch block content for ID: {block_id}")
+                        content = await self._frontend_client.get_block_content_from_frontend(self._room, self.caller_identity, block_id)
+                        if content is None:
+                            logger.error(f"[get_block_content] Frontend did not return content for ID: {block_id}")
+                        else:
                             logger.info(f"[get_block_content] Received block content from frontend for ID: {block_id}")
-                            # Enqueue a follow-up task for the Brain with the content
                             followup_task = {
                                 "task_name": "handle_response",
                                 "caller_identity": self.caller_identity,
                                 "interaction_type": "block_content",
                                 "block_id": block_id,
                                 "block_content": content,
-                                # Provide a small transcript marker for logging on the Brain side
                                 "transcript": f"[block_content:{block_id}]",
                             }
                             await self._processing_queue.put(followup_task)
-                            logger.info(
-                                f"[get_block_content] Queued follow-up task with block_id={block_id} for Brain processing"
-                            )
-                        except Exception as e:
-                            logger.error(f"[get_block_content] Error while requesting block content: {e}", exc_info=True)
-                    else:
-                        logger.warning(
-                            "[get_block_content] Frontend client, room, or caller_identity not available; cannot fetch content"
-                        )
-
-                elif tool_name == "get_canvas_elements":
-                    # Get list of all elements currently on canvas
-                    if self._frontend_client:
-                        # This would need to be implemented in frontend_client.py
-                        logger.info(
-                            "Canvas elements list requested (implementation needed)"
-                        )
-                        # TODO: Implement get_canvas_elements in frontend_client
-                    else:
-                        logger.warning(
-                            "Frontend client not available - would get canvas elements"
-                        )
-
+                            logger.info(f"[get_block_content] Queued follow-up task with block_id={block_id} for Brain processing")
+                    except Exception as e:
+                        logger.error(f"[get_block_content] Error while requesting block content: {e}", exc_info=True)
                 else:
-                    logger.warning(f"Unknown tool_name: {tool_name}")
+                    logger.warning("[get_block_content] Frontend client, room, or caller_identity not available; cannot fetch content")
 
-            except Exception as action_err:
-                logger.error(
-                    f"Error executing action '{tool_name}': {action_err}", exc_info=True
-                )
-                # Continue with next action rather than failing entire toolbelt
+            else:
+                logger.warning(f"Unknown tool_name: {tool_name}")
+
+            return (None, None)
+        except Exception as e:
+            logger.error(f"_execute_single_action error for {tool_name}: {e}", exc_info=True)
+            return (None, None)
 
     def _optimize_speech_actions(
         self, toolbelt: List[Dict[str, Any]]
@@ -2159,23 +1823,37 @@ async def entrypoint(ctx: JobContext):
                             f"[AUTO] caller_identity set on connect to {pid} (non-browser)"
                         )
 
-                    # Always enqueue a start task on connect to nudge the loop after refresh.
-                    # Mark reconnect when session already started to allow idempotent handling downstream.
-                    initial_task = {
-                        "task_name": "start_tutoring_session",
-                        "caller_identity": rox_agent_instance.caller_identity or pid,
-                    }
-                    if rox_agent_instance._session_started:
-                        initial_task["reconnect"] = True
-                        logger.info("[AUTO] Queued reconnect start task on participant_connected")
-                    else:
-                        logger.info("[AUTO] Queued session start task on participant_connected")
-
-                    await rox_agent_instance._processing_queue.put(initial_task)
-
-                    # Only set the started flag the first time
-                    if not rox_agent_instance._session_started:
-                        rox_agent_instance._session_started = True
+                    # Enqueue the initial start task only once per agent lifecycle
+                    if not rox_agent_instance._start_task_enqueued:
+                        initial_task = {
+                            "task_name": "start_tutoring_session",
+                            "caller_identity": rox_agent_instance.caller_identity or pid,
+                        }
+                        await rox_agent_instance._processing_queue.put(initial_task)
+                        rox_agent_instance._start_task_enqueued = True
+                        try:
+                            import time as _t
+                            rox_agent_instance._start_task_enqueued_at = _t.time()
+                        except Exception:
+                            rox_agent_instance._start_task_enqueued_at = None
+                        logger.info("[AUTO] Queued session start task on participant_connected (first and only)")
+                    elif not rox_agent_instance._session_started:
+                        # If we haven't started yet and the enqueued start looks stale, re-enqueue
+                        try:
+                            import time as _t
+                            ts = rox_agent_instance._start_task_enqueued_at or 0.0
+                            if (_t.time() - ts) > 8.0:
+                                initial_task = {
+                                    "task_name": "start_tutoring_session",
+                                    "caller_identity": rox_agent_instance.caller_identity or pid,
+                                }
+                                await rox_agent_instance._processing_queue.put(initial_task)
+                                rox_agent_instance._start_task_enqueued = True
+                                rox_agent_instance._start_task_enqueued_at = _t.time()
+                                logger.info("[AUTO] Re-queued stale start_tutoring_session after 8s without start")
+                        except Exception:
+                            logger.debug("[AUTO] stale-start check failed", exc_info=True)
+                    # Do not enqueue reconnect start tasks here; avoid duplicate Brain invocations
                 except Exception:
                     logger.debug(
                         "[AUTO] failed queuing start task on participant_connected",

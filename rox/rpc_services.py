@@ -136,6 +136,15 @@ class AgentInteractionService:
                 )
                 return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
+            # Prevent duplicate session start enqueues from frontend
+            if task_name == "start_tutoring_session" and self.agent:
+                if getattr(self.agent, "_session_started", False) or getattr(self.agent, "_start_task_enqueued", False):
+                    logger.info("[RPC] Skipping duplicate start_tutoring_session (already started or enqueued)")
+                    response_pb = interaction_pb2.AgentResponse(
+                        status_message="start_tutoring_session ignored: already started or enqueued"
+                    )
+                    return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+
             # Build and enqueue task for the Conductor's processing loop
             task = {
                 "task_name": task_name,
@@ -237,18 +246,11 @@ class AgentInteractionService:
         try:
             if not self.agent:
                 logger.error("Agent not available for processing student input")
-                error_response = interaction_pb2.AgentResponse(
-                    status_message="Agent not available",
-                    success=False
-                )
-                return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
-        
             # The Conductor decides the task_name based on its current expectation state
             task_name = ""
             if self.agent._expected_user_input_type == "SUBMISSION":
                 # The agent was waiting for a specific student submission
                 task_name = "handle_submission"
-                logger.info(f"Processing as submission: {task_name}")
             else:
                 # Default state is INTERRUPTION - student spoke during AI turn
                 task_name = "handle_interruption"
@@ -258,7 +260,7 @@ class AgentInteractionService:
             # Since PushToTalkRequest has no fields, we work with raw payload
             task = {
                 "task_name": task_name,
-                "transcript": raw_payload.payload,  # Use raw payload as transcript
+                "transcript": _raw,  # Use raw payload as transcript (validated non-empty)
                 "caller_identity": raw_payload.caller_identity,
             }
             
@@ -300,17 +302,54 @@ class AgentInteractionService:
             pass
         
         try:
-            # Queue session start task to trigger curriculum navigation (prevent duplicates)
-            if self.agent and not self.agent._session_started:
-                session_start_task = {
-                    "task_name": "start_tutoring_session",
-                    "caller_identity": raw_payload.caller_identity,
-                }
-                await self.agent._processing_queue.put(session_start_task)
-                self.agent._session_started = True
-                logger.info("[TestPing] Queued session start task to trigger curriculum navigation")
-            elif self.agent and self.agent._session_started:
-                logger.info("[TestPing] Session already started, skipping duplicate start")
+            # Enqueue session start only once; re-enqueue if stale and session not started
+            if self.agent:
+                started = getattr(self.agent, "_session_started", False)
+                enq = getattr(self.agent, "_start_task_enqueued", False)
+                ts = getattr(self.agent, "_start_task_enqueued_at", None)
+                if not started and (not enq):
+                    session_start_task = {
+                        "task_name": "start_tutoring_session",
+                        "caller_identity": raw_payload.caller_identity,
+                    }
+                    await self.agent._processing_queue.put(session_start_task)
+                    self.agent._start_task_enqueued = True
+                    try:
+                        import time as _t
+                        self.agent._start_task_enqueued_at = _t.time()
+                    except Exception:
+                        self.agent._start_task_enqueued_at = None
+                    logger.info("[TestPing] Queued initial session start task (first and only)")
+                elif not started and enq:
+                    try:
+                        import time as _t
+                        t0 = float(ts or 0.0)
+                        if (_t.time() - t0) > 8.0:
+                            session_start_task = {
+                                "task_name": "start_tutoring_session",
+                                "caller_identity": raw_payload.caller_identity,
+                            }
+                            await self.agent._processing_queue.put(session_start_task)
+                            self.agent._start_task_enqueued = True
+                            self.agent._start_task_enqueued_at = _t.time()
+                            logger.info("[TestPing] Re-queued stale session start task after 8s without start")
+                        else:
+                            logger.info("[TestPing] Start task enqueued recently; skipping re-queue")
+                    except Exception:
+                        logger.debug("[TestPing] stale-start check failed", exc_info=True)
+                else:
+                    # Session is already started (likely a page refresh). Nudge Brain to re-sync UI.
+                    try:
+                        reconnect_task = {
+                            "task_name": "reconnect_nudge",
+                            "caller_identity": raw_payload.caller_identity,
+                            "interaction_type": "reconnect",
+                            "transcript": "[reconnect]",
+                        }
+                        await self.agent._processing_queue.put(reconnect_task)
+                        logger.info("[TestPing] Enqueued reconnect_nudge to refresh LangGraph state after refresh")
+                    except Exception:
+                        logger.debug("[TestPing] Failed to enqueue reconnect_nudge (non-fatal)", exc_info=True)
 
             response = interaction_pb2.AgentResponse(
                 status_message="Pong! Conductor is alive and responding. Test task queued for LangGraph."
