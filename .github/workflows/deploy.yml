@@ -1,4 +1,4 @@
-name: Deploy to Cloud Run Job
+name: Deploy livekit-service to Cloud Run Service
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
 
 env:
   PROJECT_ID: first-cedar-470107-j2
-  JOB_NAME: livekit-agent-runner
+  SERVICE_NAME: livekit-service
   IMAGE_NAME: livekit-agent-worker
   REGION: asia-south1  # Update if your job is in a different region
   REGISTRY: asia-south1-docker.pkg.dev
@@ -53,12 +53,12 @@ jobs:
         docker push $REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:$GITHUB_SHA
         docker push $REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:latest
 
-    - name: Update Cloud Run Job
+    - name: Deploy Cloud Run Service
       run: |
-        gcloud run jobs update $JOB_NAME \
+        gcloud run deploy $SERVICE_NAME \
           --image=$REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:$GITHUB_SHA \
           --region=$REGION \
-          --command="python" \
-          --args="worker.py" \
+          --platform=managed \
+          --no-allow-unauthenticated \
           --project=$PROJECT_ID \
-          --update-secrets="LIVEKIT_API_KEY=LIVEKIT_API_KEY:latest,LIVEKIT_API_SECRET=LIVEKIT_API_SECRET:latest,LIVEKIT_URL=LIVEKIT_URL:latest,DEEPGRAM_API_KEY=DEEPGRAM_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,LANGGRAPH_TUTOR_URL=LANGGRAPH_TUTOR_URL:latest"
+          --update-secrets="LIVEKIT_API_KEY=LIVEKIT_API_KEY:latest,LIVEKIT_API_SECRET=LIVEKIT_API_SECRET:latest,LIVEKIT_URL=LIVEKIT_URL:latest,DEEPGRAM_API_KEY=DEEPGRAM_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,LANGGRAPH_TUTOR_URL=LANGGRAPH_TUTOR_URL:latest,OTEL_SERVICE_NAME=OTEL_SERVICE_NAME_LIVEKIT:latest,OTEL_EXPORTER_OTLP_PROTOCOL=OTEL_EXPORTER_OTLP_PROTOCOL:latest,GRAFANA_OTLP_HTTP_ENDPOINT=GRAFANA_OTLP_HTTP_ENDPOINT:latest,GRAFANA_OTLP_HEADERS=GRAFANA_OTLP_HEADERS:latest,OTEL_RESOURCE_ATTRIBUTES=OTEL_RESOURCE_ATTRIBUTES:latest,ENABLE_TURN_DETECTION=ENABLE_TURN_DETECTION:latest,TURN_DETECTION_MODEL=TURN_DETECTION_MODEL:latest,TURN_UNLIKELY_THRESHOLD=TURN_UNLIKELY_THRESHOLD:latest"
