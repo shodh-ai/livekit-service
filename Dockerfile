@@ -56,14 +56,7 @@ ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/ || exit 1
 
-# CHANGE: Check if we should run as agent or HTTP server
-# If LIVEKIT_URL is set, run as agent; otherwise run HTTP server
-CMD if [ -n "$LIVEKIT_URL" ] && [ -n "$ROOM_NAME" ]; then \
-      echo "Starting as LiveKit Agent for room: $ROOM_NAME"; \
-      python rox/main.py connect --url "$LIVEKIT_URL" --room "$ROOM_NAME" --api-key "$LIVEKIT_API_KEY" --api-secret "$LIVEKIT_API_SECRET"; \
-    else \
-      echo "Starting as HTTP Server"; \
-      python -m uvicorn rox.main:app --host 0.0.0.0 --port 8080; \
-    fi
+# Start the FastAPI HTTP server; agents are launched via the /run-agent endpoint
+CMD ["python", "rox/main.py", "--server"]
 
     

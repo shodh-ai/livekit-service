@@ -18,20 +18,54 @@ from generated.protos import interaction_pb2
 if TYPE_CHECKING:
     from main import RoxAgent
 
+# Module-level logger for this RPC service module
 logger = logging.getLogger(__name__)
+
 
 
 class AgentInteractionService:
     """Service class for handling specialized RPC interactions with the Conductor."""
 
-    def __init__(self, ctx: JobContext):
-        """Initialize the service with a job context.
+    async def _handle_interrupt_like_event(
+        self,
+        raw_payload: RpcInvocationData,
+        source: str,
+        ack_text: str = "Yes — go ahead, what's your doubt?",
+    ) -> str:
+        """Shared handler for interrupt-like events.
         
-        Args:
-            ctx: The LiveKit job context containing room and participant info
+        - Sets caller_identity (when not browser-bot)
+        - Performs optimistic interrupt acknowledgement (stop TTS, enable mic)
+        - Returns a standard AgentResponse
         """
-        self._ctx = ctx
-        self.agent: "RoxAgent" = getattr(ctx, 'rox_agent', None)
+        logger.info(f"[RPC][{source}] Handling interrupt-like event")
+        # Ensure subsequent UI RPCs target the student's frontend (not the browser pod)
+        try:
+            pid = getattr(raw_payload, 'caller_identity', None)
+            if self.agent and pid and not str(pid).startswith("browser-bot-"):
+                self.agent.caller_identity = pid
+                logger.info(f"[RPC][{source}] caller_identity set to {pid}")
+        except Exception:
+            pass
+
+        # Immediate local acknowledgement: speak quick ack, stop TTS, and enable mic
+        try:
+            if self.agent:
+                try:
+                    await self.agent.optimistic_interrupt_ack(ack_text)
+                except Exception as e:
+                    logger.warning(f"[RPC][{source}] Optimistic interrupt ack failed (continuing): {e}")
+
+            response_pb = interaction_pb2.AgentResponse(
+                status_message="Interrupt acknowledged. You may speak now."
+            )
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+        except Exception as e:
+            logger.error(f"[RPC][{source}] Error handling interrupt-like event: {e}", exc_info=True)
+            error_response = interaction_pb2.AgentResponse(
+                status_message=f"Error processing interrupt: {str(e)}"
+            )
+            return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
     async def student_wants_to_interrupt(self, raw_payload: RpcInvocationData) -> str:
         """Handle the 'Raise Hand' button press from the student.
@@ -46,37 +80,9 @@ class AgentInteractionService:
             Base64-encoded protobuf response
         """
         logger.info("[RPC] Received student_wants_to_interrupt")
-        # Ensure subsequent UI RPCs target the student's frontend (not the browser pod)
-        try:
-            pid = getattr(raw_payload, 'caller_identity', None)
-            if self.agent and pid and not str(pid).startswith("browser-bot-"):
-                self.agent.caller_identity = pid
-                logger.info(f"[RPC] caller_identity set to {pid} (from student_wants_to_interrupt)")
-        except Exception:
-            pass
-        
-        try:
-            # Immediate local acknowledgement: speak quick ack, stop TTS, and enable mic
-            if self.agent:
-                try:
-                    await self.agent.optimistic_interrupt_ack("Yes — go ahead, what's your doubt?")
-                except Exception as e:
-                    logger.warning(f"Optimistic interrupt ack failed (continuing): {e}")
-                # Legacy forwarding to Kamikaze on mic press has been removed.
-                # We now wait for the actual speech event (student_spoke_or_acted)
-                # to forward content to the Brain, avoiding duplicate "Yes?" audio.
-
-            response_pb = interaction_pb2.AgentResponse(
-                status_message="Interrupt acknowledged. You may speak now."
-            )
-            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
-            
-        except Exception as e:
-            logger.error(f"Error in student_wants_to_interrupt: {e}", exc_info=True)
-            error_response = interaction_pb2.AgentResponse(
-                status_message=f"Error processing interrupt: {str(e)}"
-            )
-            return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
+        return await self._handle_interrupt_like_event(
+            raw_payload, source="raise_hand", ack_text="Yes — go ahead, what's your doubt?"
+        )
 
     async def InvokeAgentTask(self, raw_payload: RpcInvocationData) -> str:
         """Handle generic task invocation from the frontend.
@@ -195,37 +201,9 @@ class AgentInteractionService:
             Base64-encoded protobuf response
         """
         logger.info("[RPC] Received student_mic_button_interrupt")
-        # Ensure subsequent UI RPCs target the student's frontend (not the browser pod)
-        try:
-            pid = getattr(raw_payload, 'caller_identity', None)
-            if self.agent and pid and not str(pid).startswith("browser-bot-"):
-                self.agent.caller_identity = pid
-                logger.info(f"[RPC] caller_identity set to {pid} (from student_mic_button_interrupt)")
-        except Exception:
-            pass
-        
-        try:
-            # Immediate local acknowledgement: speak quick ack, stop TTS, and enable mic on UI
-            if self.agent:
-                try:
-                    await self.agent.optimistic_interrupt_ack("Yes — go ahead, what's your doubt?")
-                except Exception as e:
-                    logger.warning(f"Optimistic interrupt ack failed (continuing): {e}")
-                # Legacy forwarding to Kamikaze on mic press has been removed.
-                # We now wait for the actual speech event (student_spoke_or_acted)
-                # to forward content to the Brain, avoiding duplicate "Yes?" audio.
-
-            response_pb = interaction_pb2.AgentResponse(
-                status_message="Mic interrupt acknowledged. You may speak now."
-            )
-            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
-            
-        except Exception as e:
-            logger.error(f"Error in student_mic_button_interrupt: {e}", exc_info=True)
-            error_response = interaction_pb2.AgentResponse(
-                status_message=f"Error processing mic interrupt: {str(e)}"
-            )
-            return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
+        return await self._handle_interrupt_like_event(
+            raw_payload, source="mic_button", ack_text="Yes — go ahead, what's your doubt?"
+        )
 
     async def student_spoke_or_acted(self, raw_payload: RpcInvocationData) -> str:
         """Handle enriched student input from the Frontend Sensor.
@@ -258,9 +236,20 @@ class AgentInteractionService:
         
             # Build comprehensive task data for the Brain
             # Since PushToTalkRequest has no fields, we work with raw payload
+            # Decode transcript best-effort from base64 payload
+            transcript_text = ""
+            try:
+                if getattr(raw_payload, 'payload', None):
+                    decoded = base64.b64decode(raw_payload.payload)
+                    try:
+                        transcript_text = decoded.decode('utf-8', errors='ignore')
+                    except Exception:
+                        transcript_text = str(decoded)
+            except Exception:
+                transcript_text = ""
             task = {
                 "task_name": task_name,
-                "transcript": _raw,  # Use raw payload as transcript (validated non-empty)
+                "transcript": transcript_text,
                 "caller_identity": raw_payload.caller_identity,
             }
             
@@ -338,18 +327,9 @@ class AgentInteractionService:
                     except Exception:
                         logger.debug("[TestPing] stale-start check failed", exc_info=True)
                 else:
-                    # Session is already started (likely a page refresh). Nudge Brain to re-sync UI.
-                    try:
-                        reconnect_task = {
-                            "task_name": "reconnect_nudge",
-                            "caller_identity": raw_payload.caller_identity,
-                            "interaction_type": "reconnect",
-                            "transcript": "[reconnect]",
-                        }
-                        await self.agent._processing_queue.put(reconnect_task)
-                        logger.info("[TestPing] Enqueued reconnect_nudge to refresh LangGraph state after refresh")
-                    except Exception:
-                        logger.debug("[TestPing] Failed to enqueue reconnect_nudge (non-fatal)", exc_info=True)
+                    # Session is already started; avoid enqueuing reconnect_nudge to prevent a second
+                    # LangGraph call after the initial start_session.
+                    logger.info("[TestPing] Session already started; skipping reconnect_nudge to avoid duplicate POST")
 
             response = interaction_pb2.AgentResponse(
                 status_message="Pong! Conductor is alive and responding. Test task queued for LangGraph."

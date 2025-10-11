@@ -38,6 +38,7 @@ from pydantic import BaseModel
 
 # FastAPI imports for HTTP service mode
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from collections import defaultdict
 
 try:
     from model import AgentRequest
@@ -48,11 +49,17 @@ except ImportError:
     class AgentRequest(BaseModel):
         room_name: str
         room_url: str
+        student_token_metadata: Optional[str] = None
+
+# This dictionary will keep track of running agents to prevent duplicates
+# The key will be the room_name
+running_agents: Dict[str, asyncio.Task] = defaultdict(asyncio.Task)
+running_agents_lock: Optional[asyncio.Lock] = None
 
 
 # LiveKit imports
 from livekit import rtc, agents
-from livekit.agents import Agent, JobContext, WorkerOptions
+from livekit.agents import Agent, JobContext, WorkerOptions, Worker
 from livekit.agents.llm import LLM, ChatChunk, ChoiceDelta, ChatContext
 from contextlib import asynccontextmanager
 from livekit.plugins import deepgram, silero
@@ -609,6 +616,14 @@ class RoxAgent(Agent):
                     logger.info(
                         "[INTERRUPTION] Reset cancellation and pause flags - interruption response will execute fully"
                     )
+                else:
+                    # Also ensure we don't carry a stale pause/cancel state into a fresh plan
+                    if self._is_paused or self._current_execution_cancelled:
+                        logger.info(
+                            "[EXECUTION] Clearing stale pause/cancel flags for normal execution"
+                        )
+                    self._current_execution_cancelled = False
+                    self._is_paused = False
 
                 if not actions:
                     logger.warning(
@@ -1662,11 +1677,22 @@ async def entrypoint(ctx: JobContext):
         try:
             if getattr(ctx, "room", None):
                 _root_span.set_attribute("livekit.room.name", getattr(ctx.room, "name", None))
-                _root_span.set_attribute("livekit.room.sid", getattr(ctx.room, "sid", None))
+                # Resolve room SID which may be a coroutine in some SDK versions
+                try:
+                    _sid_attr = getattr(ctx.room, "sid", None)
+                    room_sid = await _sid_attr if asyncio.iscoroutine(_sid_attr) else _sid_attr
+                except Exception:
+                    room_sid = None
+                _root_span.set_attribute("livekit.room.sid", room_sid)
                 lp = getattr(ctx.room, "local_participant", None)
                 if lp:
                     _root_span.set_attribute("livekit.participant.identity", getattr(lp, "identity", None))
-                    _root_span.set_attribute("livekit.participant.sid", getattr(lp, "sid", None))
+                    try:
+                        _lp_sid_attr = getattr(lp, "sid", None)
+                        lp_sid = await _lp_sid_attr if asyncio.iscoroutine(_lp_sid_attr) else _lp_sid_attr
+                    except Exception:
+                        lp_sid = None
+                    _root_span.set_attribute("livekit.participant.sid", lp_sid)
         except Exception:
             pass
     except Exception as e:
@@ -1723,7 +1749,7 @@ async def entrypoint(ctx: JobContext):
             logger.warning(f"[data_received] Failed to process packet: {e}")
 
     # --- Participant disconnect handling: delayed shutdown with grace window ---
-    student_disconnect_grace = float(os.getenv("STUDENT_DISCONNECT_GRACE_SEC", "12"))
+    student_disconnect_grace = float(os.getenv("STUDENT_DISCONNECT_GRACE_SEC", "4"))
     student_disconnect_task: asyncio.Task | None = None
 
     async def _delayed_student_shutdown(identity: str):
@@ -1823,6 +1849,31 @@ async def entrypoint(ctx: JobContext):
                             f"[AUTO] caller_identity set on connect to {pid} (non-browser)"
                         )
 
+                    # Populate metadata from this participant if missing
+                    if (
+                        (not rox_agent_instance.user_id or not rox_agent_instance.curriculum_id)
+                        and not (str(pid).startswith("browser-bot-"))
+                    ):
+                        try:
+                            pmeta = getattr(participant, "metadata", None)
+                            if asyncio.iscoroutine(pmeta):
+                                pmeta = await pmeta
+                            if pmeta:
+                                meta = json.loads(pmeta)
+                                uid = meta.get("user_id")
+                                cid = meta.get("curriculum_id")
+                                if uid:
+                                    rox_agent_instance.user_id = uid
+                                if cid:
+                                    rox_agent_instance.curriculum_id = cid
+                                rox_agent_instance.current_lo_id = meta.get("current_lo_id", rox_agent_instance.current_lo_id)
+                                if rox_agent_instance.user_id and rox_agent_instance.curriculum_id:
+                                    logger.info(
+                                        f"[AUTO] Populated agent state from participant metadata: user_id={rox_agent_instance.user_id}, curriculum_id={rox_agent_instance.curriculum_id}"
+                                    )
+                        except Exception:
+                            logger.debug("[AUTO] Failed to parse participant metadata on connect", exc_info=True)
+
                     # Enqueue the initial start task only once per agent lifecycle
                     if not rox_agent_instance._start_task_enqueued:
                         initial_task = {
@@ -1868,43 +1919,72 @@ async def entrypoint(ctx: JobContext):
 
     ctx.room.on("participant_connected", _on_participant_connected_start)
 
-    # --- NEW: Read metadata from the token and populate agent state ---
+    # --- NEW: Read metadata and populate agent state (prefer room/participant metadata) ---
     try:
-        local_participant = ctx.room.local_participant
-        metadata_str = local_participant.metadata
-        metadata = json.loads(metadata_str) if metadata_str else {}
+        metadata: Dict[str, Any] = {}
 
-        # *** THE KEY CHANGE: Read the curriculum_id from environment metadata ***
-        # The metadata is now passed from the worker environment
-        metadata_str = os.getenv("STUDENT_TOKEN_METADATA", "{}")
-        metadata = json.loads(metadata_str) if metadata_str else {}
+        # 1) Prefer env override if explicitly provided
+        env_meta_str = os.getenv("STUDENT_TOKEN_METADATA")
+        if env_meta_str:
+            try:
+                metadata = json.loads(env_meta_str)
+            except Exception:
+                logger.warning("Failed to parse STUDENT_TOKEN_METADATA; ignoring env override")
+
+        # 2) Fallback to room metadata (set during room creation)
+        if not metadata:
+            try:
+                room_meta = getattr(ctx.room, "metadata", None)
+                if asyncio.iscoroutine(room_meta):
+                    room_meta = await room_meta
+                if room_meta:
+                    metadata = json.loads(room_meta)
+            except Exception:
+                logger.debug("Room metadata unavailable or invalid", exc_info=True)
+
+        # 3) Fallback to first non-browser remote participant metadata (student)
+        if not metadata:
+            try:
+                rp = getattr(ctx.room, "remote_participants", {}) or {}
+                for pid, participant in list(rp.items()):
+                    ident = str(getattr(participant, "identity", "") or pid)
+                    if ident.startswith("browser-bot-"):
+                        continue
+                    pmeta = getattr(participant, "metadata", None)
+                    if asyncio.iscoroutine(pmeta):
+                        pmeta = await pmeta
+                    if pmeta:
+                        metadata = json.loads(pmeta)
+                        break
+            except Exception:
+                logger.debug("Participant metadata unavailable or invalid", exc_info=True)
+
+        # 4) Last fallback: local participant metadata
+        if not metadata:
+            try:
+                local_participant = ctx.room.local_participant
+                lp_meta = getattr(local_participant, "metadata", None)
+                if asyncio.iscoroutine(lp_meta):
+                    lp_meta = await lp_meta
+                if lp_meta:
+                    metadata = json.loads(lp_meta)
+            except Exception:
+                logger.debug("Local participant metadata unavailable or invalid", exc_info=True)
 
         rox_agent_instance.user_id = metadata.get("user_id")
-
-        # *** THE KEY CHANGE: Read the curriculum_id ***
-        rox_agent_instance.curriculum_id = metadata.get(
-            "curriculum_id"
-        )  # Using 'curriculum_id' variable name
-
-        # Validate that we have the necessary IDs
-        if not rox_agent_instance.user_id or not rox_agent_instance.curriculum_id:
-            logger.error(
-                f"CRITICAL: Missing user_id or curriculum_id in metadata. Agent cannot function."
-            )
-            try:
-                otel_context.detach(_root_token)
-                _root_span.end()
-            except Exception:
-                pass
-            return
-
+        rox_agent_instance.curriculum_id = metadata.get("curriculum_id")
         rox_agent_instance.current_lo_id = metadata.get("current_lo_id")
 
-        logger.info(
-            f"Agent state populated: user_id={rox_agent_instance.user_id}, curriculum_id={rox_agent_instance.curriculum_id}"
-        )
+        if rox_agent_instance.user_id and rox_agent_instance.curriculum_id:
+            logger.info(
+                f"Agent state populated: user_id={rox_agent_instance.user_id}, curriculum_id={rox_agent_instance.curriculum_id}"
+            )
+        else:
+            logger.warning(
+                "Missing user_id or curriculum_id in metadata. Proceeding; will attempt to populate when student joins."
+            )
     except Exception as e:
-        logger.warning(f"Could not parse token metadata, using defaults: {e}")
+        logger.warning(f"Could not populate metadata; proceeding with defaults: {e}")
 
     # Create AgentSession with audio capabilities and LLM interceptor
     # The LLM interceptor will process user speech and forward to LangGraph
@@ -2087,7 +2167,12 @@ async def entrypoint(ctx: JobContext):
     main_agent_session.on("user_state_changed", _handle_user_state_change)
 
     # --- Register RPC Handlers (The Conductor's "Ears") ---
-    agent_rpc_service = AgentInteractionService(ctx=ctx)
+    agent_rpc_service = AgentInteractionService()
+    # Provide the service access to the live agent instance
+    try:
+        setattr(agent_rpc_service, "agent", rox_agent_instance)
+    except Exception:
+        pass
     service_name = "rox.interaction.AgentInteraction"
     local_participant = ctx.room.local_participant
 
@@ -2261,8 +2346,11 @@ def read_root():
 
 
 @app.post("/run-agent")
-def run_agent(agent_request: AgentRequest):
-    """Launch a LiveKit agent for the specified room"""
+async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTasks):
+    """
+    Launch a LiveKit agent for the specified room as a background task
+    within this running service.
+    """
     room_name = agent_request.room_name
     room_url = agent_request.room_url
     api_key = os.getenv("LIVEKIT_API_KEY")
@@ -2274,34 +2362,57 @@ def run_agent(agent_request: AgentRequest):
             detail="Server configuration error: LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set.",
         )
 
-    python_executable = sys.executable
-    current_script = __file__
-    print(f"Starting agent for room: {room_name}")
-    print(f"Room url: {room_url}")
+    # --- Prevent Duplicate Agents ---
+    global running_agents_lock
+    if running_agents_lock is None:
+        running_agents_lock = asyncio.Lock()
+    async with running_agents_lock:
+        if room_name in running_agents and not running_agents[room_name].done():
+            logger.info(f"Agent for room '{room_name}' is already running. Skipping new launch.")
+            return {"message": f"Agent for room {room_name} is already active."}
 
-    try:
-        # Launch this same script in agent mode
-        command = [
-            python_executable,
-            current_script,
-            "connect",  # The command for the CLI
-            "--url",  # The URL flag
-            room_url,  # The URL value
-            "--room",  # The room flag
-            room_name,
-            "--api-key",  # The API key flag
-            api_key,
-            "--api-secret",  # The API secret flag
-            api_secret,
-        ]
-        print(f"Executing command: {' '.join(command)}")
+        # --- Define the worker task ---
+        async def _run_worker_task():
+            logger.info(f"Starting agent worker task for room: {room_name}")
+            try:
+                # Set environment variables for the worker context
+                os.environ["LIVEKIT_URL"] = room_url
+                os.environ["LIVEKIT_ROOM_NAME"] = room_name
+                # Optionally pass through student token metadata for early availability
+                try:
+                    stm = agent_request.student_token_metadata
+                    if stm:
+                        os.environ["STUDENT_TOKEN_METADATA"] = stm
+                        logger.info("STUDENT_TOKEN_METADATA provided via /run-agent; set for worker context")
+                except Exception:
+                    logger.debug("Failed to set STUDENT_TOKEN_METADATA from request (non-fatal)", exc_info=True)
 
-        # Run the agent as a non-blocking subprocess
-        process = subprocess.Popen(command)
+                worker_options = WorkerOptions(
+                    entrypoint_fnc=entrypoint,
+                    ws_url=room_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                )
+                worker = Worker(worker_options)
 
-        return {"message": f"Agent started for room {room_name}", "pid": process.pid}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to run agent: {str(e)}")
+                # Start the worker; runs until session ends or error occurs
+                await worker.run()
+
+            except Exception as e:
+                logger.error(f"Agent worker for room {room_name} failed: {e}", exc_info=True)
+            finally:
+                logger.info(f"Agent worker for room {room_name} has shut down.")
+                # Clean up the entry in our tracking dictionary
+                async with running_agents_lock:
+                    if room_name in running_agents:
+                        del running_agents[room_name]
+
+        # --- Start the task in the background ---
+        task = asyncio.create_task(_run_worker_task())
+        running_agents[room_name] = task
+
+        logger.info(f"Agent for room {room_name} has been scheduled to run in the background.")
+        return {"message": f"Agent scheduled for room {room_name}"}
 
 
 
@@ -2457,8 +2568,9 @@ def run_fastapi_server():
     """Run the FastAPI server"""
     import uvicorn
 
-    logger.info("Starting FastAPI server on port 5005")
-    uvicorn.run(app, host="0.0.0.0", port=5005)
+    port = int(os.getenv("PORT", "8080"))
+    logger.info(f"Starting FastAPI server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
