@@ -1749,7 +1749,7 @@ async def entrypoint(ctx: JobContext):
             logger.warning(f"[data_received] Failed to process packet: {e}")
 
     # --- Participant disconnect handling: delayed shutdown with grace window ---
-    student_disconnect_grace = float(os.getenv("STUDENT_DISCONNECT_GRACE_SEC", "4"))
+    student_disconnect_grace = float(os.getenv("STUDENT_DISCONNECT_GRACE_SEC", "12"))
     student_disconnect_task: asyncio.Task | None = None
 
     async def _delayed_student_shutdown(identity: str):

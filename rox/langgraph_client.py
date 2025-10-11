@@ -28,7 +28,7 @@ class LangGraphClient:
         )
 
         # Configurable HTTP timeouts
-        total_timeout = float(os.getenv("LANGGRAPH_TOTAL_TIMEOUT", "30"))
+        total_timeout = float(os.getenv("LANGGRAPH_TOTAL_TIMEOUT", "120"))
         connect_timeout = float(os.getenv("LANGGRAPH_CONNECT_TIMEOUT", "10"))
         sock_connect_timeout = float(
             os.getenv("LANGGRAPH_SOCK_CONNECT_TIMEOUT", str(connect_timeout))
