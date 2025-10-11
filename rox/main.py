@@ -51,9 +51,9 @@ except ImportError:
         room_url: str
         student_token_metadata: Optional[str] = None
 
-# This dictionary will keep track of running agents to prevent duplicates
+# This dictionary will keep track of running agent PROCESSES to prevent duplicates
 # The key will be the room_name
-running_agents: Dict[str, asyncio.Task] = defaultdict(asyncio.Task)
+running_agents: Dict[str, subprocess.Popen] = {}
 running_agents_lock: Optional[asyncio.Lock] = None
 
 
@@ -2348,8 +2348,8 @@ def read_root():
 @app.post("/run-agent")
 async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTasks):
     """
-    Launch a LiveKit agent for the specified room as a background task
-    within this running service.
+    Launch a LiveKit agent for the specified room as a separate background PROCESS.
+    This ensures complete isolation between agent sessions and avoids state collisions.
     """
     room_name = agent_request.room_name
     room_url = agent_request.room_url
@@ -2362,60 +2362,61 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
             detail="Server configuration error: LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set.",
         )
 
-    # --- Prevent Duplicate Agents ---
-    global running_agents_lock
+    # --- Prevent Duplicate Agent PROCESSES ---
+    global running_agents_lock, running_agents
     if running_agents_lock is None:
         running_agents_lock = asyncio.Lock()
+
     async with running_agents_lock:
-        if room_name in running_agents and not running_agents[room_name].done():
-            logger.info(f"Agent for room '{room_name}' is already running. Skipping new launch.")
+        # Clean up any finished processes
+        try:
+            finished_rooms = [r for r, proc in running_agents.items() if proc.poll() is not None]
+            for r in finished_rooms:
+                try:
+                    del running_agents[r]
+                except Exception:
+                    pass
+        except Exception:
+            logger.debug("Failed to sweep finished agent processes", exc_info=True)
+
+        # Check if a process for this room is already running
+        if room_name in running_agents:
+            logger.info(f"Agent process for room '{room_name}' is already running. Skipping new launch.")
             return {"message": f"Agent for room {room_name} is already active."}
 
-        # --- Define the worker task ---
-        async def _run_worker_task():
-            logger.info(f"Starting agent worker task for room: {room_name}")
-            logger.info(f"Attempting to connect to LiveKit URL: {room_url}")
+        # Define a synchronous launcher for FastAPI background task
+        def _launch_agent_process():
             try:
-                # Set environment variables for the worker context
-                os.environ["LIVEKIT_URL"] = room_url
-                os.environ["LIVEKIT_ROOM_NAME"] = room_name
-                # Optionally pass through student token metadata for early availability
-                try:
-                    stm = agent_request.student_token_metadata
-                    if stm:
-                        os.environ["STUDENT_TOKEN_METADATA"] = stm
-                        logger.info("STUDENT_TOKEN_METADATA provided via /run-agent; set for worker context")
-                except Exception:
-                    logger.debug("Failed to set STUDENT_TOKEN_METADATA from request (non-fatal)", exc_info=True)
+                logger.info(f"Starting agent subprocess for room: {room_name}")
+                # Prepare environment for isolated process
+                env = os.environ.copy()
+                env["LIVEKIT_URL"] = room_url
+                env["LIVEKIT_ROOM_NAME"] = room_name
+                env["LIVEKIT_API_KEY"] = api_key or ""
+                env["LIVEKIT_API_SECRET"] = api_secret or ""
+                if agent_request.student_token_metadata:
+                    env["STUDENT_TOKEN_METADATA"] = agent_request.student_token_metadata
 
-                worker_options = WorkerOptions(
-                    entrypoint_fnc=entrypoint,
-                    ws_url=room_url,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                )
-                worker = Worker(worker_options)
-                # Log before the blocking call
-                logger.info(f"Worker for room {room_name} created. Calling worker.run()...")
-                # Start the worker; runs until session ends or error occurs
-                await worker.run()
-                # Log after the call completes (normally shouldn't unless session ends)
-                logger.info(f"Worker for room {room_name} has finished its run loop.")
+                # Command to run this module in agent mode via the CLI
+                command = [
+                    sys.executable,
+                    __file__,
+                    "connect",
+                    "--room", room_name,
+                    "--url", room_url,
+                    "--api-key", api_key or "",
+                    "--api-secret", api_secret or "",
+                ]
 
-            except Exception as e:
-                logger.error(f"Agent worker for room {room_name} failed: {e}", exc_info=True)
-            finally:
-                logger.info(f"Agent worker for room {room_name} has shut down.")
-                # Clean up the entry in our tracking dictionary
-                async with running_agents_lock:
-                    if room_name in running_agents:
-                        del running_agents[room_name]
+                proc = subprocess.Popen(command, env=env)
+                running_agents[room_name] = proc
+                logger.info(f"Agent subprocess for room {room_name} launched with PID: {proc.pid}")
+            except Exception:
+                logger.error("Failed launching agent subprocess", exc_info=True)
 
-        # --- Start the task in the background ---
-        task = asyncio.create_task(_run_worker_task())
-        running_agents[room_name] = task
-
-        logger.info(f"Agent for room {room_name} has been scheduled to run in the background.")
+        # Schedule launcher without blocking HTTP response
+        background_tasks.add_task(_launch_agent_process)
+        logger.info(f"Agent for room {room_name} has been scheduled to launch in a new process.")
         return {"message": f"Agent scheduled for room {room_name}"}
 
 
