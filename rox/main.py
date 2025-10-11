@@ -2374,6 +2374,7 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
         # --- Define the worker task ---
         async def _run_worker_task():
             logger.info(f"Starting agent worker task for room: {room_name}")
+            logger.info(f"Attempting to connect to LiveKit URL: {room_url}")
             try:
                 # Set environment variables for the worker context
                 os.environ["LIVEKIT_URL"] = room_url
@@ -2394,9 +2395,12 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
                     api_secret=api_secret,
                 )
                 worker = Worker(worker_options)
-
+                # Log before the blocking call
+                logger.info(f"Worker for room {room_name} created. Calling worker.run()...")
                 # Start the worker; runs until session ends or error occurs
                 await worker.run()
+                # Log after the call completes (normally shouldn't unless session ends)
+                logger.info(f"Worker for room {room_name} has finished its run loop.")
 
             except Exception as e:
                 logger.error(f"Agent worker for room {room_name} failed: {e}", exc_info=True)
