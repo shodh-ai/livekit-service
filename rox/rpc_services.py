@@ -298,8 +298,6 @@ class AgentInteractionService:
                 }
                 await self.agent._processing_queue.put(start_task)
 
-                # Set the flag so that any future pings are treated as reconnects.
-                self.agent._session_started = True
 
             else:
                 # The session has ALREADY started. This ping must be from a page refresh.
