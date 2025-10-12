@@ -270,78 +270,59 @@ class AgentInteractionService:
             return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
     async def TestPing(self, raw_payload: RpcInvocationData) -> str:
-        """Handle ping requests for testing connectivity.
-        
-        Also queues a test task to verify end-to-end LangGraph communication.
-        
-        Args:
-            raw_payload: The raw RPC payload
-            
-        Returns:
-            Base64-encoded protobuf response
+        """Handles the initial handshake from the frontend.
+        This is the definitive trigger for starting a session or handling a reconnect.
         """
         logger.info("[RPC] Received TestPing")
-        # Ensure subsequent UI RPCs target the student's frontend (not the browser pod)
         try:
+            # Always update the agent's target identity to the student who pinged.
             pid = getattr(raw_payload, 'caller_identity', None)
             if self.agent and pid and not str(pid).startswith("browser-bot-"):
                 self.agent.caller_identity = pid
-                logger.info(f"[RPC] caller_identity set to {pid} (from TestPing)")
-        except Exception:
-            pass
-        
-        try:
-            # Enqueue session start only once; re-enqueue if stale and session not started
-            if self.agent:
-                started = getattr(self.agent, "_session_started", False)
-                enq = getattr(self.agent, "_start_task_enqueued", False)
-                ts = getattr(self.agent, "_start_task_enqueued_at", None)
-                if not started and (not enq):
-                    session_start_task = {
-                        "task_name": "start_tutoring_session",
-                        "caller_identity": raw_payload.caller_identity,
-                    }
-                    await self.agent._processing_queue.put(session_start_task)
-                    self.agent._start_task_enqueued = True
-                    try:
-                        import time as _t
-                        self.agent._start_task_enqueued_at = _t.time()
-                    except Exception:
-                        self.agent._start_task_enqueued_at = None
-                    logger.info("[TestPing] Queued initial session start task (first and only)")
-                elif not started and enq:
-                    try:
-                        import time as _t
-                        t0 = float(ts or 0.0)
-                        if (_t.time() - t0) > 8.0:
-                            session_start_task = {
-                                "task_name": "start_tutoring_session",
-                                "caller_identity": raw_payload.caller_identity,
-                            }
-                            await self.agent._processing_queue.put(session_start_task)
-                            self.agent._start_task_enqueued = True
-                            self.agent._start_task_enqueued_at = _t.time()
-                            logger.info("[TestPing] Re-queued stale session start task after 8s without start")
-                        else:
-                            logger.info("[TestPing] Start task enqueued recently; skipping re-queue")
-                    except Exception:
-                        logger.debug("[TestPing] stale-start check failed", exc_info=True)
-                else:
-                    # Session is already started; avoid enqueuing reconnect_nudge to prevent a second
-                    # LangGraph call after the initial start_session.
-                    logger.info("[TestPing] Session already started; skipping reconnect_nudge to avoid duplicate POST")
+                logger.info(f"[RPC] Caller identity set to {pid} (from TestPing)")
 
-            response = interaction_pb2.AgentResponse(
-                status_message="Pong! Conductor is alive and responding. Test task queued for LangGraph."
+            if not self.agent:
+                logger.error("Agent not available in TestPing handler")
+                error_response = interaction_pb2.AgentResponse(status_message="Agent not available")
+                return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
+
+            # Check if the session has been started yet for this agent instance.
+            # We use the agent's internal flag to ensure this decision is made only once.
+            if not getattr(self.agent, "_session_started", False):
+                # This is the FIRST ping. The session has not started. Let's start it.
+                logger.info("[TestPing] First ping received. Enqueuing start_tutoring_session.")
+
+                start_task = {
+                    "task_name": "start_tutoring_session",
+                    "caller_identity": pid,
+                }
+                await self.agent._processing_queue.put(start_task)
+
+                # Set the flag so that any future pings are treated as reconnects.
+                self.agent._session_started = True
+
+            else:
+                # The session has ALREADY started. This ping must be from a page refresh.
+                # This is where we send the "reconnect nudge" to Kamikaze.
+                logger.info("[TestPing] Reconnect ping received. Enqueuing reconnect_nudge.")
+
+                reconnect_task = {
+                    "task_name": "reconnect_nudge",
+                    "caller_identity": pid,
+                    "interaction_type": "reconnect",
+                    "transcript": "[reconnect]",
+                }
+                await self.agent._processing_queue.put(reconnect_task)
+
+            # Always return a success response
+            response_pb = interaction_pb2.AgentResponse(
+                status_message="Pong! Conductor is alive and responding."
             )
-            
-            return base64.b64encode(response.SerializeToString()).decode('utf-8')
-            
+            return base64.b64encode(response_pb.SerializeToString()).decode('utf-8')
+
         except Exception as e:
             logger.error(f"Error in TestPing: {e}", exc_info=True)
-            error_response = interaction_pb2.AgentResponse(
-                status_message=f"Error in ping: {str(e)}"
-            )
+            error_response = interaction_pb2.AgentResponse(status_message=f"Error in ping: {str(e)}")
             return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
     async def student_stopped_listening(self, raw_payload: RpcInvocationData) -> str:
