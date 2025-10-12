@@ -281,6 +281,16 @@ class AgentInteractionService:
                 self.agent.caller_identity = pid
                 logger.info(f"[RPC] Caller identity set to {pid} (from TestPing)")
 
+            # Bind audio/transcription to this student's participant identity
+            try:
+                if self.agent and getattr(self.agent, "agent_session", None):
+                    room_io = getattr(self.agent.agent_session, "_room_io", None)
+                    if room_io and getattr(self.agent, "_room", None):
+                        room_io.set_participant(pid)
+                        logger.info(f"[RPC] RoomIO linked to participant for audio/transcription: {pid}")
+            except Exception:
+                logger.debug("[RPC] Failed to link RoomIO to participant (non-fatal)", exc_info=True)
+
             if not self.agent:
                 logger.error("Agent not available in TestPing handler")
                 error_response = interaction_pb2.AgentResponse(status_message="Agent not available")
