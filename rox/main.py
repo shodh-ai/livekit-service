@@ -742,17 +742,8 @@ class RoxAgent(Agent):
                                 cleaned_text, allow_interruptions=True
                             )
                             await playback_handle
-
-                        await asyncio.wait_for(speak_operation(), timeout=30.0)
+                        await speak_operation()
                         logger.info(f"TTS completed for: {cleaned_text[:50]}...")
-                    except asyncio.TimeoutError:
-                        logger.error(
-                            f"TTS operation timed out after 30s for: {cleaned_text[:50]}..."
-                        )
-                        try:
-                            self.agent_session.interrupt()
-                        except Exception:
-                            pass
                     except Exception as e:
                         logger.error(
                             f"TTS operation failed for '{cleaned_text[:50]}...': {e}",
