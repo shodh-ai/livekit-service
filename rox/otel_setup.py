@@ -9,6 +9,17 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.instrumentation.aiohttp_client import AioHttpClientInstrumentor
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
+# Metrics support
+try:
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter as OTLPMetricExporterGRPC
+    from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter as OTLPMetricExporterHTTP
+    _OTEL_METRICS_AVAILABLE = True
+except Exception:
+    _OTEL_METRICS_AVAILABLE = False
+
 # HTTPX instrumentation is optional; guard import to avoid hard failure if package is absent
 try:
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor  # type: ignore
@@ -115,6 +126,49 @@ def init_tracing(service_name: str | None = None) -> None:
 
     provider.add_span_processor(BatchSpanProcessor(span_exporter))
     trace.set_tracer_provider(provider)
+
+    # --- OTel Metrics export (optional) ---
+    try:
+        if _OTEL_METRICS_AVAILABLE:
+            metrics_headers = (
+                _parse_headers_env(os.getenv("OTEL_EXPORTER_OTLP_METRICS_HEADERS"))
+                or generic_headers
+                or grafana_headers
+            )
+            if protocol in ("http", "http/protobuf"):
+                metrics_endpoint = (
+                    os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                    or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    or (
+                        grafana_http_traces.replace("/v1/traces", "/v1/metrics")
+                        if grafana_http_traces and "/v1/traces" in grafana_http_traces
+                        else None
+                    )
+                    or "http://localhost:4318/v1/metrics"
+                )
+                metric_exporter = OTLPMetricExporterHTTP(endpoint=metrics_endpoint, headers=metrics_headers or None)
+                try:
+                    logger.info(f"OTel metrics: HTTP exporter configured -> {metrics_endpoint}")
+                except Exception:
+                    pass
+            else:
+                metrics_endpoint = (
+                    os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                    or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    or "http://localhost:4317"
+                )
+                insecure_metrics = os.getenv("OTEL_EXPORTER_OTLP_INSECURE", "false").lower() == "true"
+                metric_exporter = OTLPMetricExporterGRPC(endpoint=metrics_endpoint, insecure=insecure_metrics, headers=metrics_headers or None)
+                try:
+                    logger.info(f"OTel metrics: gRPC exporter configured -> {metrics_endpoint} (insecure={insecure_metrics})")
+                except Exception:
+                    pass
+
+            metric_reader = PeriodicExportingMetricReader(metric_exporter, export_interval_millis=60000)
+            meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+            metrics.set_meter_provider(meter_provider)
+    except Exception:
+        pass
 
     # --- OTel Logs export (optional) ---
     try:

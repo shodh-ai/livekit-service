@@ -85,6 +85,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# +++ START OF FIX +++
+# Silence the noisy OpenTelemetry exporter and its HTTP client.
+# This prevents the logging feedback loop where the act of exporting logs
+# creates more logs that need to be exported.
+noisy_loggers = [
+    "opentelemetry.exporter.otlp.proto.http._log_exporter",
+    "opentelemetry.instrumentation.aiohttp_client",
+    "aiohttp.access",
+    "httpx",
+]
+for logger_name in noisy_loggers:
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
+# +++ END OF FIX +++
+
 # Debounce window to suppress duplicate mic-enable RPCs (in seconds)
 MIC_ENABLE_DEBOUNCE_SEC = float(os.getenv("MIC_ENABLE_DEBOUNCE_SEC", "0.5"))
 
