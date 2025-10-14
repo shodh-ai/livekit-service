@@ -63,7 +63,7 @@ from livekit import rtc, agents
 from livekit.agents import Agent, JobContext, WorkerOptions, Worker
 from livekit.agents.llm import LLM, ChatChunk, ChoiceDelta, ChatContext
 from contextlib import asynccontextmanager
-from livekit.plugins import deepgram, silero
+from livekit.plugins import deepgram
 
 # from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -336,8 +336,6 @@ class RoxAgent(Agent):
 
         # Processing queue for tasks from the Brain
         self._processing_queue: asyncio.Queue = asyncio.Queue()
-        # Pending scheduled task to end a user turn after hangover
-        self._pending_turn_end_task: Optional[asyncio.Task] = None
 
         # --- LLM Interceptor for Speech Processing ---
         self.llm_interceptor = self.TranscriptInterceptor(self)
@@ -1551,65 +1549,6 @@ class RoxAgent(Agent):
         await self._processing_queue.put(task)
         logger.info(f"Queued task '{task_name}' for Brain processing")
 
-    async def _handle_vad_mic_off(self):
-        """Handle automatic mic turn-off detected by VAD.
-
-        This method is called when VAD detects the user has stopped speaking.
-        It immediately disables the microphone via frontend RPC.
-        """
-        logger.info("[VAD_MIC_OFF] Auto-disabling microphone after speech detection")
-
-        # Disable mic via frontend RPC
-        if self._frontend_client and self.caller_identity:
-            success = await self._frontend_client.set_mic_enabled(
-                room=self._room,
-                identity=self.caller_identity,
-                enabled=False,
-                message="Processing your input...",
-            )
-            if success:
-                logger.info(
-                    "[VAD_MIC_OFF] Successfully disabled microphone via frontend RPC"
-                )
-            else:
-                logger.warning(
-                    "[VAD_MIC_OFF] Failed to disable microphone via frontend RPC"
-                )
-        else:
-            logger.warning(
-                "[VAD_MIC_OFF] Frontend client or caller_identity not available for mic disable"
-            )
-
-    async def _process_user_speech_auto(self, transcript: str):
-        """Process user speech automatically detected by VAD.
-
-        Args:
-            transcript: The speech transcript to process
-        """
-        logger.info(f"[VAD_AUTO] Processing auto-detected speech: {transcript}")
-
-        # Disable mic via frontend RPC (idempotent / safe if already off)
-        if self._frontend_client and self.caller_identity:
-            try:
-                await self._frontend_client.set_mic_enabled(
-                    self._room,
-                    self.caller_identity,
-                    False,
-                    message="Processing your input...",
-                )
-                logger.info("[VAD_AUTO] Disabled microphone via frontend RPC")
-            except Exception as e:
-                logger.warning(f"[VAD_AUTO] Failed to disable microphone via RPC: {e}")
-
-        # Queue the transcript for LangGraph processing
-        task = {
-            "task_name": "handle_response",
-            "caller_identity": self.caller_identity,
-            "transcript": transcript,
-            "interaction_type": "vad_auto_speech",
-        }
-        await self._processing_queue.put(task)
-        logger.info("[VAD_AUTO] Queued speech transcript for Brain processing")
 
     async def _process_manual_stop_listening(self, task: Dict[str, Any]):
         """Process manual mic turn-off by user.
@@ -1973,33 +1912,7 @@ async def entrypoint(ctx: JobContext):
             encoding="linear16",
             sample_rate=24000,
         ),
-        "vad": silero.VAD.load(
-            min_silence_duration=1.0,
-            prefix_padding_duration=0.2,
-        ),
     }
-
-    # Disable heavy turn detection by default to avoid OOM in inference subprocess.
-    # Enable by setting ENABLE_TURN_DETECTION=true. If enabled, prefer the lighter English model.
-    if os.getenv("ENABLE_TURN_DETECTION", "false").lower() == "true":
-        try:
-            model_choice = os.getenv("TURN_DETECTION_MODEL", "english").lower()
-            if model_choice == "multilingual":
-                from livekit.plugins.turn_detector.multilingual import MultilingualModel as _TDModel
-            else:
-                from livekit.plugins.turn_detector.english import EnglishModel as _TDModel
-
-            session_kwargs["turn_detection"] = _TDModel(
-                unlikely_threshold=float(os.getenv("TURN_UNLIKELY_THRESHOLD", "0.1"))
-            )
-            logger.info(f"Turn detection enabled using model: {model_choice}")
-        except Exception as e:
-            logger.warning(
-                f"Failed to enable turn detection, proceeding without it: {e}",
-                exc_info=True,
-            )
-    else:
-        logger.info("Turn detection disabled (ENABLE_TURN_DETECTION=false). Using VAD-only.")
 
     main_agent_session = agents.AgentSession(**session_kwargs)
     rox_agent_instance.agent_session = main_agent_session
@@ -2069,70 +1982,7 @@ async def entrypoint(ctx: JobContext):
     except Exception:
         logger.debug("[AUTO] failed to register browser join hook", exc_info=True)
 
-    # Enhanced user state handler for VAD-based automatic mic turn-off
-    def _handle_user_state_change(ev):
-        logger.info(f"[TURN] User state changed: {ev.old_state} -> {ev.new_state}")
-
-        HANGOVER_MS = int(os.getenv("TURN_HANGOVER_MS", "900"))
-
-        # Cancel any pending turn-end if speech resumes
-        if ev.old_state == "listening" and ev.new_state == "speaking":
-            try:
-                if (
-                    rox_agent_instance._pending_turn_end_task
-                    and not rox_agent_instance._pending_turn_end_task.done()
-                ):
-                    rox_agent_instance._pending_turn_end_task.cancel()
-                    rox_agent_instance._pending_turn_end_task = None
-                    logger.info("[TURN] Cancelled pending turn-end due to resumed speech")
-            except Exception:
-                logger.debug("[TURN] Failed cancelling pending turn-end", exc_info=True)
-            return
-
-        # Schedule a delayed mic-off when user stops speaking
-        if ev.old_state == "speaking" and ev.new_state == "listening":
-            logger.info("[TURN] Scheduling mic-off after hangover")
-
-            # Cancel any prior pending task
-            try:
-                if (
-                    rox_agent_instance._pending_turn_end_task
-                    and not rox_agent_instance._pending_turn_end_task.done()
-                ):
-                    rox_agent_instance._pending_turn_end_task.cancel()
-            except Exception:
-                logger.debug("[TURN] Error cancelling old pending task", exc_info=True)
-
-            async def _delayed_end():
-                try:
-                    await asyncio.sleep(HANGOVER_MS / 1000.0)
-                    # Perform mic off and process transcript
-                    await rox_agent_instance._handle_vad_mic_off()
-
-                    transcript = ""
-                    if (
-                        hasattr(rox_agent_instance.llm_interceptor, "_buffer")
-                        and rox_agent_instance.llm_interceptor._buffer
-                    ):
-                        transcript = " ".join(rox_agent_instance.llm_interceptor._buffer)
-                        rox_agent_instance.llm_interceptor._buffer.clear()
-                        logger.info(f"[TURN] Using buffered transcript: {transcript}")
-
-                    if transcript.strip():
-                        await rox_agent_instance._process_user_speech_auto(transcript)
-                    else:
-                        logger.info("[TURN] No transcript to process after hangover")
-                except asyncio.CancelledError:
-                    logger.info("[TURN] Hangover task cancelled")
-                except Exception:
-                    logger.debug("[TURN] Hangover task error", exc_info=True)
-                finally:
-                    rox_agent_instance._pending_turn_end_task = None
-
-            rox_agent_instance._pending_turn_end_task = asyncio.create_task(_delayed_end())
-
-    # Register the VAD handler AFTER rox_agent_instance is created
-    main_agent_session.on("user_state_changed", _handle_user_state_change)
+    
 
     # --- Register RPC Handlers (The Conductor's "Ears") ---
     agent_rpc_service = AgentInteractionService()
