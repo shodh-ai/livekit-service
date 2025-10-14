@@ -11,9 +11,23 @@ import os
 import asyncio
 import aiohttp
 import random
+import time
 from typing import Dict, Any, List, Optional
+from opentelemetry import metrics
 
 logger = logging.getLogger(__name__)
+try:
+    _meter = metrics.get_meter("rox.langgraph_client")
+    _langgraph_latency_histogram = _meter.create_histogram(
+        "rox.langgraph.client.duration", unit="s", description="Measures the duration of requests to the LangGraph service."
+    )
+    _langgraph_error_counter = _meter.create_counter(
+        "rox.langgraph.client.errors", unit="1", description="Counts the number of errors when calling the LangGraph service."
+    )
+except Exception:
+    _meter = None
+    _langgraph_latency_histogram = None
+    _langgraph_error_counter = None
 
 class LangGraphClient:
     def __init__(self, agent=None):
@@ -131,7 +145,9 @@ class LangGraphClient:
             The response dictionary containing delivery_plan, or None if failed.
         """
         logger.info(f"Invoking LangGraph with task: {task.get('task_name')}")
-        
+        start_time = time.monotonic()
+        endpoint_label = "unknown"
+
         # Base request body for all endpoints
         request_body = {
             "session_id": session_id,
@@ -167,9 +183,11 @@ class LangGraphClient:
                 # Route to appropriate endpoint based on task type
                 if task.get("task_name") == "start_tutoring_session":
                     endpoint = "/start_session"
+                    endpoint_label = endpoint
                     # For session start, use base request body (no student_input needed)
                 elif task.get("interaction_type") == "interruption" or task.get("task_name") in ["handle_interruption", "student_mic_button_interrupt", "student_wants_to_interrupt"]:
                     endpoint = "/handle_interruption"
+                    endpoint_label = endpoint
                     # Interruption payload
                     interrupt_text = task.get("transcript") or request_body.get("student_input") or "[Student interrupted]"
                     request_body["student_input"] = interrupt_text
@@ -187,6 +205,7 @@ class LangGraphClient:
                         request_body["visual_context"] = vc
                 else:
                     endpoint = "/handle_response"
+                    endpoint_label = endpoint
                     # Add student_input for regular response
                     request_body["student_input"] = task.get("transcript", "")
                     # Compose visual_context from task and optional VNC screenshot
@@ -277,6 +296,11 @@ class LangGraphClient:
                                     err_text = await response.text()
                                 except Exception:
                                     err_text = "<no body>"
+                                try:
+                                    if _langgraph_error_counter:
+                                        _langgraph_error_counter.add(1, {"endpoint": endpoint})
+                                except Exception:
+                                    pass
                                 logger.error(f"LangGraphClient 4xx response {status} from {full_url}: {err_text}")
                                 return None
                             # For 5xx and others, raise for retry handling
@@ -318,6 +342,11 @@ class LangGraphClient:
                                 return None
                     except asyncio.TimeoutError as e:
                         last_error = e
+                        try:
+                            if _langgraph_error_counter:
+                                _langgraph_error_counter.add(1, {"endpoint": endpoint})
+                        except Exception:
+                            pass
                         if attempt < self.max_retries:
                             delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
                             logger.warning(
@@ -333,6 +362,11 @@ class LangGraphClient:
                     except aiohttp.ClientResponseError as e:
                         # Raised by raise_for_status(); treat 5xx as retryable, 4xx handled above
                         last_error = e
+                        try:
+                            if _langgraph_error_counter:
+                                _langgraph_error_counter.add(1, {"endpoint": endpoint})
+                        except Exception:
+                            pass
                         if 500 <= e.status < 600 and attempt < self.max_retries:
                             delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
                             logger.warning(
@@ -347,6 +381,11 @@ class LangGraphClient:
                             break
                     except aiohttp.ClientError as e:
                         last_error = e
+                        try:
+                            if _langgraph_error_counter:
+                                _langgraph_error_counter.add(1, {"endpoint": endpoint})
+                        except Exception:
+                            pass
                         # For transient network errors, also retry
                         if attempt < self.max_retries:
                             delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
@@ -368,8 +407,29 @@ class LangGraphClient:
                 return None
                         
         except aiohttp.ClientError as e:
+            try:
+                if _langgraph_error_counter:
+                    _langgraph_error_counter.add(1, {"endpoint": endpoint_label})
+            except Exception:
+                pass
             logger.error(f"HTTP error communicating with LangGraph: {e}")
             return None
         except Exception as e:
+            try:
+                if _langgraph_error_counter:
+                    _langgraph_error_counter.add(1, {"endpoint": endpoint_label})
+            except Exception:
+                pass
             logger.error(f"Unexpected error invoking LangGraph task: {e}", exc_info=True)
             return None
+        finally:
+            try:
+                _duration = time.monotonic() - start_time
+                if _langgraph_latency_histogram:
+                    _langgraph_latency_histogram.record(_duration, {"endpoint": endpoint_label})
+                try:
+                    logger.info(f"LangGraphClient duration={_duration:.3f}s endpoint={endpoint_label}")
+                except Exception:
+                    pass
+            except Exception:
+                pass

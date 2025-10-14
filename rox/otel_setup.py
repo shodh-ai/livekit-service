@@ -170,9 +170,10 @@ def init_tracing(service_name: str | None = None) -> None:
     except Exception:
         pass
 
-    # --- OTel Logs export (optional) ---
+    # --- OTel Logs export (optional; gated) ---
     try:
-        if _OTEL_LOGS_AVAILABLE:
+        _logs_enabled = os.getenv("OTEL_LOGS_ENABLED", "false").lower() in ("1", "true", "yes")
+        if _OTEL_LOGS_AVAILABLE and _logs_enabled:
             logs_headers = (
                 _parse_headers_env(os.getenv("OTEL_EXPORTER_OTLP_LOGS_HEADERS"))
                 or generic_headers
@@ -229,6 +230,21 @@ def init_tracing(service_name: str | None = None) -> None:
     except Exception:
         pass
     try:
-        LoggingInstrumentor().instrument(set_logging_format=True)
+        if os.getenv("OTEL_LOGS_ENABLED", "false").lower() in ("1", "true", "yes"):
+            LoggingInstrumentor().instrument(set_logging_format=True)
+    except Exception:
+        pass
+
+    # Reduce noisy exporter and client logs
+    try:
+        for name in [
+            "opentelemetry.exporter.otlp.proto.http._log_exporter",
+            "opentelemetry.exporter.otlp.proto.grpc.exporter",
+            "opentelemetry.instrumentation.aiohttp_client",
+            "opentelemetry.instrumentation.httpx",
+            "aiohttp.access",
+            "httpx",
+        ]:
+            logging.getLogger(name).setLevel(logging.WARNING)
     except Exception:
         pass

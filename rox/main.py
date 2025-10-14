@@ -32,6 +32,7 @@ from otel_setup import init_tracing
 from opentelemetry import trace as otel_trace
 from opentelemetry import context as otel_context
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry import metrics
 from tracing import ensure_trace_id, set_trace_id, get_trace_id
 from logging_setup import install_logging_filter
 from pydantic import BaseModel
@@ -108,6 +109,17 @@ load_dotenv(dotenv_path=project_root / ".env")
 # Initialize OpenTelemetry tracing for the service (global)
 try:
     init_tracing(os.getenv("OTEL_SERVICE_NAME", "livekit-service"))
+except Exception:
+    pass
+
+try:
+    meter = metrics.get_meter("rox.main")
+    active_agents_counter = meter.create_up_down_counter(
+        "rox.agents.active", unit="1", description="The number of active RoxAgent instances currently running."
+    )
+    tool_usage_counter = meter.create_counter(
+        "rox.agent.tool.runs", unit="1", description="Counts the number of times a specific tool is executed."
+    )
 except Exception:
     pass
 
@@ -354,6 +366,11 @@ class RoxAgent(Agent):
         self._browser_join_cb_registered: bool = False
 
         logger.info("RoxAgent Conductor initialized")
+        try:
+            active_agents_counter.add(1)
+        except Exception:
+            pass
+        self._shutdown_recorded = False
 
     async def processing_loop(self):
         """The main engine of the Conductor.
@@ -372,6 +389,24 @@ class RoxAgent(Agent):
                 # Wait for a task to be queued (from user speech or RPC)
                 task = await self._processing_queue.get()
                 logger.info(f"DEQUEUED TASK: {json.dumps(task, indent=2)}")
+
+                # +++ START OF FIX: Handle high-priority tasks as interruptions +++
+                # If the incoming task is a user-initiated action that should interrupt the AI
+                # (like clicking a suggestion or a manual interruption), trigger the interruption handler.
+                interaction_type = task.get("interaction_type")
+                if interaction_type in ["interruption", "suggested_response", "manual_stop_listening"]:
+                    logger.info(
+                        f"[INTERRUPTION] High-priority task received with interaction_type '{interaction_type}'. Triggering interruption handler."
+                    )
+                    # The handle_interruption method will stop TTS, clear current plan,
+                    # and re-queue this task with the correct context for immediate processing.
+                    await self.handle_interruption(task)
+
+                    # Mark the original dequeued task as done and continue the loop.
+                    # The handler has already re-queued a new, enriched task.
+                    self._processing_queue.task_done()
+                    continue
+                # +++ END OF FIX +++
 
                 # Set per-task trace context for logs and spans if present
                 try:
@@ -723,6 +758,10 @@ class RoxAgent(Agent):
                     if control == "return":
                         return value
             except Exception as e:
+                try:
+                    tool_usage_counter.add(0, {"tool_name": str(tool_name), "status": "error"})
+                except Exception:
+                    pass
                 logger.error(f"Blocking action '{tool_name}' failed: {e}", exc_info=True)
 
     async def _execute_single_action(self, tool_name: str, parameters: Dict[str, Any]):
@@ -730,6 +769,10 @@ class RoxAgent(Agent):
         Currently supports: speak/speak_text, display_visual_aid,
         add_excalidraw_block, update_excalidraw_block.
         """
+        try:
+            tool_usage_counter.add(1, {"tool_name": str(tool_name)})
+        except Exception:
+            pass
         try:
             if tool_name in ("speak", "speak_text"):
                 text = parameters.get("text", "")
@@ -1656,6 +1699,14 @@ class RoxAgent(Agent):
         """
         return self._interrupted_plan_context
 
+    async def cleanup(self):
+        if not getattr(self, "_shutdown_recorded", False):
+            try:
+                active_agents_counter.add(-1)
+            except Exception:
+                pass
+            self._shutdown_recorded = True
+
 
 async def entrypoint(ctx: JobContext):
     """Main entrypoint for the Conductor agent.
@@ -2124,6 +2175,10 @@ async def entrypoint(ctx: JobContext):
     except Exception as e:
         logger.error(f"Failed to register RPC handlers: {e}", exc_info=True)
         try:
+            try:
+                await rox_agent_instance.cleanup()
+            except Exception:
+                pass
             otel_context.detach(_root_token)
             _root_span.end()
         except Exception:
@@ -2233,6 +2288,10 @@ async def entrypoint(ctx: JobContext):
     # Close the root span and detach context once the job ends
     try:
         try:
+            await rox_agent_instance.cleanup()
+        except Exception:
+            pass
+        try:
             handshake_task.cancel()
             with contextlib.suppress(Exception):
                 await handshake_task
@@ -2242,6 +2301,7 @@ async def entrypoint(ctx: JobContext):
         _root_span.end()
     except Exception:
         pass
+    return  # Cannot continue without RPC handlers
 
 
 # FastAPI application instance for HTTP service mode
@@ -2260,7 +2320,6 @@ except Exception as e:
 def read_root():
     """Health check endpoint"""
     return {"service": "Rox Agent Service", "status": "running"}
-
 
 @app.post("/run-agent")
 async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTasks):
@@ -2289,17 +2348,34 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
         try:
             finished_rooms = [r for r, proc in running_agents.items() if proc.poll() is not None]
             for r in finished_rooms:
-                try:
-                    del running_agents[r]
-                except Exception:
-                    pass
+                logger.info(f"Cleaning up finished agent process for room '{r}'")
+                del running_agents[r]
         except Exception:
             logger.debug("Failed to sweep finished agent processes", exc_info=True)
 
-        # Check if a process for this room is already running
+        # +++ START OF FIX: IDEMPOTENT AGENT LAUNCHER +++
+        # If a process for this room is already tracked, terminate it before starting a new one.
+        # This handles reconnects and ensures a fresh agent is always available.
         if room_name in running_agents:
-            logger.info(f"Agent process for room '{room_name}' is already running. Skipping new launch.")
-            return {"message": f"Agent for room {room_name} is already active."}
+            logger.warning(f"Request to start agent for an already tracked room '{room_name}'. Terminating the old process.")
+            try:
+                old_proc = running_agents[room_name]
+                # Politely ask the process to terminate
+                old_proc.terminate()
+                # Wait up to 5 seconds for it to shut down gracefully
+                old_proc.wait(timeout=5)
+                logger.info(f"Successfully terminated existing agent process for room '{room_name}' with PID: {old_proc.pid}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout expired while waiting for old agent process to terminate. Forcing kill.")
+                # Force kill if it doesn't respond
+                old_proc.kill()
+            except Exception as e:
+                logger.error(f"Error terminating existing agent for room '{room_name}': {e}", exc_info=True)
+            finally:
+                # Ensure the entry is removed from tracking, no matter what.
+                if room_name in running_agents:
+                    del running_agents[room_name]
+        # +++ END OF FIX +++
 
         # Define a synchronous launcher for FastAPI background task
         def _launch_agent_process():
@@ -2335,8 +2411,6 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
         background_tasks.add_task(_launch_agent_process)
         logger.info(f"Agent for room {room_name} has been scheduled to launch in a new process.")
         return {"message": f"Agent scheduled for room {room_name}"}
-
-
 
 class BrowserCommandRequest(BaseModel):
     room_name: str
