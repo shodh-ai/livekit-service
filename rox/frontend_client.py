@@ -9,8 +9,10 @@ import logging
 import uuid
 import base64
 import os
+import json
 from typing import Dict, Any, Optional, List
 from livekit import rtc
+import asyncio
 from generated.protos import interaction_pb2
 from utils.ui_action_factory import build_ui_action_request
 
@@ -21,6 +23,24 @@ class FrontendClient:
     
     def __init__(self):
         self.rpc_method_name = "rox.interaction.ClientSideUI/PerformUIAction"
+
+    async def _send_data(self, room: rtc.Room, identity: str, envelope: Dict[str, Any]) -> bool:
+        if not identity or not room:
+            return False
+        try:
+            payload = json.dumps(envelope)
+            try:
+                logger.info(f"[B2F DATA SEND] to '{identity}' type={envelope.get('type')} action={envelope.get('action')}")
+            except Exception:
+                pass
+            await room.local_participant.publish_data(
+                payload,
+                destination_identities=[identity],
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[B2F DATA FAIL] to '{identity}': {e}", exc_info=True)
+            return False
 
     async def _send_rpc(self, room: rtc.Room, identity: str, action_type: str, parameters: Dict[str, Any], timeout_sec: Optional[float] = None) -> Optional[interaction_pb2.ClientUIActionResponse]:
         """
@@ -54,20 +74,52 @@ class FrontendClient:
             payload_bytes = request_pb.SerializeToString()
             base64_encoded_payload = base64.b64encode(payload_bytes).decode("utf-8")
 
-            # Send the RPC, allowing caller to extend the LiveKit response timeout
-            async def _do_rpc():
+            # Send the RPC with retries and extended timeout
+            env_default = os.getenv("FRONTEND_RPC_TIMEOUT_SEC", "15")
+            try:
+                default_timeout = float(env_default)
+            except Exception:
+                default_timeout = 15.0
+            eff_timeout = float(timeout_sec) if (timeout_sec and timeout_sec > 0) else default_timeout
+
+            async def _do_rpc_once():
+                # Verify destination presence when available
+                try:
+                    if hasattr(room, "remote_participants"):
+                        rp = getattr(room, "remote_participants", {})
+                        if isinstance(rp, dict) and identity not in rp:
+                            raise RuntimeError(f"destination '{identity}' not present")
+                except Exception:
+                    pass
                 return await room.local_participant.perform_rpc(
                     destination_identity=identity,
                     method=self.rpc_method_name,
                     payload=base64_encoded_payload,
-                    response_timeout=timeout_sec,
+                    response_timeout=eff_timeout,
                 )
 
-            if timeout_sec and timeout_sec > 0:
-                import asyncio
-                response_payload_str = await asyncio.wait_for(_do_rpc(), timeout=timeout_sec)
-            else:
-                response_payload_str = await _do_rpc()
+            # Breadcrumb before send
+            try:
+                logger.info(f"[B2F RPC SEND] ID: {request_pb.request_id}, Action: '{action_type}' to client '{identity}'")
+            except Exception:
+                pass
+
+            max_retries = 3
+            last_exc: Optional[Exception] = None
+            response_payload_str = None
+            for attempt in range(max_retries):
+                try:
+                    response_payload_str = await _do_rpc_once()
+                    break
+                except Exception as e:
+                    last_exc = e
+                    msg = str(e).lower()
+                    if ("timeout" in msg or "not present" in msg) and attempt < max_retries - 1:
+                        await asyncio.sleep(1.0)
+                        continue
+                    raise
+            if response_payload_str is None and last_exc:
+                raise last_exc
 
             # Parse the response
             response_bytes = base64.b64decode(response_payload_str)
@@ -75,9 +127,18 @@ class FrontendClient:
             response_pb.ParseFromString(response_bytes)
 
             logger.info(f"UI action response from '{identity}': Success={response_pb.success}")
+            try:
+                logger.info(f"[B2F RPC SUCCESS] ID: {request_pb.request_id}: Success={response_pb.success}")
+            except Exception:
+                pass
             return response_pb
 
         except Exception as e:
+            try:
+                rid = request_pb.request_id if 'request_pb' in locals() else 'unknown'
+                logger.error(f"[B2F RPC FAIL] ID: {rid} - Failed to send UI action RPC to '{identity}': {e}")
+            except Exception:
+                pass
             logger.error(f"Failed to send UI action RPC to '{identity}': {e}", exc_info=True)
             return None
 
@@ -93,8 +154,13 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        response = await self._send_rpc(room, identity, "SET_UI_STATE", params)
-        return response is not None and response.success
+        envelope = {
+            "type": "ui",
+            "action": "SET_UI_STATE",
+            "parameters": params or {},
+        }
+        ok = await self._send_data(room, identity, envelope)
+        return ok
 
     async def execute_visual_action(self, room: rtc.Room, identity: str, tool_name: str, params: Dict[str, Any]) -> bool:
         """
@@ -168,18 +234,15 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise.
         """
-        params: Dict[str, Any] = {}
-        if suggestions:
-            params["suggestions"] = suggestions
-        if responses:
-            params["responses"] = responses
-        if title:
-            params["title"] = title
-        if group_id:
-            params["group_id"] = group_id
-
-        response = await self._send_rpc(room, identity, "SUGGESTED_RESPONSES", params)
-        return response is not None and response.success
+        # Suggested Responses RPC disabled. Keep UI-only placeholders on the frontend.
+        try:
+            cnt = len(suggestions or responses or [])
+        except Exception:
+            cnt = 0
+        logger.info(
+            f"[FrontendClient] SUGGESTED_RESPONSES RPC suppressed (UI placeholder only). title={title!r}, count={cnt}"
+        )
+        return True
 
     async def trigger_rrweb_replay(self, room: rtc.Room, identity: str, events_url: str) -> bool:
         """
@@ -403,11 +466,9 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        # Use the existing action types that the frontend already supports
-        action_type = "START_LISTENING_VISUAL" if enabled else "STOP_LISTENING_VISUAL"
-        params = {
-            "message": message
-        } if message else {}
-        
-        response = await self._send_rpc(room, identity, action_type, params)
-        return response is not None and response.success
+        # Feature removed: mic auto-enable/disable no longer dispatched to frontend
+        try:
+            logger.info(f"[MIC CONTROL SUPPRESSED] set_mic_enabled(enabled={enabled}) for '{identity}' skipped (feature removed)")
+        except Exception:
+            pass
+        return True

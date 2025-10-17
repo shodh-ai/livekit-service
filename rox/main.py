@@ -32,6 +32,7 @@ from otel_setup import init_tracing
 from opentelemetry import trace as otel_trace
 from opentelemetry import context as otel_context
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry import metrics
 from tracing import ensure_trace_id, set_trace_id, get_trace_id
 from logging_setup import install_logging_filter
 from pydantic import BaseModel
@@ -62,7 +63,7 @@ from livekit import rtc, agents
 from livekit.agents import Agent, JobContext, WorkerOptions, Worker
 from livekit.agents.llm import LLM, ChatChunk, ChoiceDelta, ChatContext
 from contextlib import asynccontextmanager
-from livekit.plugins import deepgram, silero
+from livekit.plugins import deepgram
 
 # from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -85,6 +86,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# +++ START OF FIX +++
+# Silence the noisy OpenTelemetry exporter and its HTTP client.
+# This prevents the logging feedback loop where the act of exporting logs
+# creates more logs that need to be exported.
+noisy_loggers = [
+    "opentelemetry.exporter.otlp.proto.http._log_exporter",
+    "opentelemetry.instrumentation.aiohttp_client",
+    "aiohttp.access",
+    "httpx",
+    "opentelemetry.exporter.otlp.proto.http",
+    "urllib3",
+    "urllib3.connectionpool",
+    "requests",
+    "requests.packages.urllib3",
+]
+for logger_name in noisy_loggers:
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
+# +++ END OF FIX +++
+
 # Debounce window to suppress duplicate mic-enable RPCs (in seconds)
 MIC_ENABLE_DEBOUNCE_SEC = float(os.getenv("MIC_ENABLE_DEBOUNCE_SEC", "0.5"))
 
@@ -94,6 +114,17 @@ load_dotenv(dotenv_path=project_root / ".env")
 # Initialize OpenTelemetry tracing for the service (global)
 try:
     init_tracing(os.getenv("OTEL_SERVICE_NAME", "livekit-service"))
+except Exception:
+    pass
+
+try:
+    meter = metrics.get_meter("rox.main")
+    active_agents_counter = meter.create_up_down_counter(
+        "rox.agents.active", unit="1", description="The number of active RoxAgent instances currently running."
+    )
+    tool_usage_counter = meter.create_counter(
+        "rox.agent.tool.runs", unit="1", description="Counts the number of times a specific tool is executed."
+    )
 except Exception:
     pass
 
@@ -310,8 +341,6 @@ class RoxAgent(Agent):
 
         # Processing queue for tasks from the Brain
         self._processing_queue: asyncio.Queue = asyncio.Queue()
-        # Pending scheduled task to end a user turn after hangover
-        self._pending_turn_end_task: Optional[asyncio.Task] = None
 
         # --- LLM Interceptor for Speech Processing ---
         self.llm_interceptor = self.TranscriptInterceptor(self)
@@ -340,6 +369,11 @@ class RoxAgent(Agent):
         self._browser_join_cb_registered: bool = False
 
         logger.info("RoxAgent Conductor initialized")
+        try:
+            active_agents_counter.add(1)
+        except Exception:
+            pass
+        self._shutdown_recorded = False
 
     async def processing_loop(self):
         """The main engine of the Conductor.
@@ -358,6 +392,31 @@ class RoxAgent(Agent):
                 # Wait for a task to be queued (from user speech or RPC)
                 task = await self._processing_queue.get()
                 logger.info(f"DEQUEUED TASK: {json.dumps(task, indent=2)}")
+                # Breadcrumb for dequeues to correlate with frontend RPC id
+                try:
+                    rpc_id_dbg = task.get("_rpcId", "not_provided") if isinstance(task, dict) else "not_provided"
+                    tname_dbg = task.get("task_name") if isinstance(task, dict) else None
+                    logger.info(f"[QUEUE GET] ID: {rpc_id_dbg}, Task: {tname_dbg}")
+                except Exception:
+                    pass
+
+                # +++ START OF FIX: Handle high-priority tasks as interruptions +++
+                # If the incoming task is a user-initiated action that should interrupt the AI
+                # (like clicking a suggestion or a manual interruption), trigger the interruption handler.
+                interaction_type = task.get("interaction_type")
+                if interaction_type in ["interruption", "manual_stop_listening"]:
+                    logger.info(
+                        f"[INTERRUPTION] High-priority task received with interaction_type '{interaction_type}'. Triggering interruption handler."
+                    )
+                    # The handle_interruption method will stop TTS, clear current plan,
+                    # and re-queue this task with the correct context for immediate processing.
+                    await self.handle_interruption(task)
+
+                    # Mark the original dequeued task as done and continue the loop.
+                    # The handler has already re-queued a new, enriched task.
+                    self._processing_queue.task_done()
+                    continue
+                # +++ END OF FIX +++
 
                 # Set per-task trace context for logs and spans if present
                 try:
@@ -538,75 +597,13 @@ class RoxAgent(Agent):
                     else {}
                 )
 
-                # Proactively emit Suggested Responses if provided only in metadata
+                # Suggested Responses dispatch disabled; UI uses placeholders only.
                 try:
                     if metadata:
-                        meta_suggestions = (
-                            metadata.get("suggested_responses")
-                            or metadata.get("suggestions")
-                            or metadata.get("responses")
-                        )
-                        meta_title = metadata.get("title") or metadata.get("prompt")
-
-                        if meta_suggestions:
-                            try:
-                                count = (
-                                    len(meta_suggestions)
-                                    if isinstance(meta_suggestions, list)
-                                    else 0
-                                )
-                            except Exception:
-                                count = 0
-                            logger.info(
-                                f"[META] Found suggested responses in delivery_plan.metadata: count={count}, title={meta_title!r}"
-                            )
-
-                            if self._frontend_client:
-                                try:
-                                    # Accept both rich objects and plain strings
-                                    if isinstance(meta_suggestions, list) and all(
-                                        isinstance(x, str) for x in meta_suggestions
-                                    ):
-                                        ok = await self._frontend_client.send_suggested_responses(
-                                            self._room,
-                                            self.caller_identity,
-                                            responses=meta_suggestions,
-                                            title=meta_title,
-                                        )
-                                    else:
-                                        ok = await self._frontend_client.send_suggested_responses(
-                                            self._room,
-                                            self.caller_identity,
-                                            suggestions=meta_suggestions,
-                                            title=meta_title,
-                                        )
-
-                                    if ok:
-                                        logger.info(
-                                            f"[META] Dispatched SUGGESTED_RESPONSES to frontend successfully (count={count})"
-                                        )
-                                    else:
-                                        logger.error(
-                                            "[META] Frontend RPC returned failure for SUGGESTED_RESPONSES from metadata"
-                                        )
-                                except Exception as e:
-                                    logger.error(
-                                        f"[META] Failed sending SUGGESTED_RESPONSES from metadata: {e}",
-                                        exc_info=True,
-                                    )
-                            else:
-                                logger.warning(
-                                    "[META] Frontend client not available - would send SUGGESTED_RESPONSES from metadata"
-                                )
-                        else:
-                            logger.debug(
-                                "[META] No suggested responses present in delivery_plan.metadata"
-                            )
+                        if any(k in metadata for k in ("suggested_responses", "suggestions", "responses")):
+                            logger.info("[META] Suggested responses present in metadata; backend dispatch suppressed (UI placeholder).")
                 except Exception:
-                    logger.debug(
-                        "[META] Error while inspecting/sending metadata-based suggested responses",
-                        exc_info=True,
-                    )
+                    logger.debug("[META] Error while checking metadata for suggestions (suppressed)", exc_info=True)
 
                 # Reset cancellation flag AND pause flag before executing interruption response
                 # This ensures interruption responses (speak, listen, etc.) always run
@@ -709,6 +706,10 @@ class RoxAgent(Agent):
                     if control == "return":
                         return value
             except Exception as e:
+                try:
+                    tool_usage_counter.add(0, {"tool_name": str(tool_name), "status": "error"})
+                except Exception:
+                    pass
                 logger.error(f"Blocking action '{tool_name}' failed: {e}", exc_info=True)
 
     async def _execute_single_action(self, tool_name: str, parameters: Dict[str, Any]):
@@ -716,6 +717,10 @@ class RoxAgent(Agent):
         Currently supports: speak/speak_text, display_visual_aid,
         add_excalidraw_block, update_excalidraw_block.
         """
+        try:
+            tool_usage_counter.add(1, {"tool_name": str(tool_name)})
+        except Exception:
+            pass
         try:
             if tool_name in ("speak", "speak_text"):
                 text = parameters.get("text", "")
@@ -728,17 +733,8 @@ class RoxAgent(Agent):
                                 cleaned_text, allow_interruptions=True
                             )
                             await playback_handle
-
-                        await asyncio.wait_for(speak_operation(), timeout=30.0)
+                        await speak_operation()
                         logger.info(f"TTS completed for: {cleaned_text[:50]}...")
-                    except asyncio.TimeoutError:
-                        logger.error(
-                            f"TTS operation timed out after 30s for: {cleaned_text[:50]}..."
-                        )
-                        try:
-                            self.agent_session.interrupt()
-                        except Exception:
-                            pass
                     except Exception as e:
                         logger.error(
                             f"TTS operation failed for '{cleaned_text[:50]}...': {e}",
@@ -904,45 +900,17 @@ class RoxAgent(Agent):
                 else:
                     logger.warning("Frontend client not available - would send suggested responses")
 
-            # --- Listening / mic control ---
+            # --- Listening / mic control (removed) ---
             elif tool_name == "listen":
-                logger.info("Preparing to listen, adding a pre-listen delay...")
-                await asyncio.sleep(0.2)
+                # Keep expectation update, but do not perform mic control
                 self._expected_user_input_type = "INTERRUPTION"
-                logger.info("State of Expectation set to: INTERRUPTION")
-                if self._frontend_client:
-                    now = time.time()
-                    if self._last_mic_enable_ts is None or (now - self._last_mic_enable_ts) > MIC_ENABLE_DEBOUNCE_SEC:
-                        await self._frontend_client.set_mic_enabled(self._room, self.caller_identity, True, message="You may speak now...")
-                        self._last_mic_enable_ts = now
-                        logger.info("[LISTEN] Enabled microphone for student input")
-                    else:
-                        logger.info(f"[LISTEN] Skipping mic enable due to debounce (dt={(now - self._last_mic_enable_ts):.3f}s)")
-                else:
-                    logger.warning("[LISTEN] Frontend client not available - microphone not enabled")
+                logger.info("[LISTEN] Mic control suppressed; expectation set to INTERRUPTION")
 
             elif tool_name == "START_LISTENING_VISUAL":
-                if self._frontend_client:
-                    logger.info(f"[START_LISTENING_VISUAL] Attempting to enable mic for caller_identity: {self.caller_identity}")
-                    now = time.time()
-                    if self._last_mic_enable_ts is None or (now - self._last_mic_enable_ts) > MIC_ENABLE_DEBOUNCE_SEC:
-                        success = await self._frontend_client.set_mic_enabled(self._room, self.caller_identity, True, message=parameters.get("message", ""))
-                        if success:
-                            self._last_mic_enable_ts = now
-                            logger.info(f"[START_LISTENING_VISUAL] Successfully enabled microphone: {parameters.get('message', '')}")
-                        else:
-                            logger.error(f"[START_LISTENING_VISUAL] Failed to enable microphone via RPC. caller_identity: {self.caller_identity}, room: {self._room is not None}")
-                    else:
-                        logger.info(f"[START_LISTENING_VISUAL] Skipping mic enable due to debounce (dt={(now - self._last_mic_enable_ts):.3f}s)")
-                else:
-                    logger.warning(f"[START_LISTENING_VISUAL] Frontend client not available - would enable mic: {parameters.get('message', '')}")
+                logger.info("[START_LISTENING_VISUAL] Suppressed (mic control removed)")
 
             elif tool_name == "STOP_LISTENING_VISUAL":
-                if self._frontend_client:
-                    await self._frontend_client.set_mic_enabled(self._room, self.caller_identity, False, message=parameters.get("message", ""))
-                    logger.info(f"Disabled microphone: {parameters.get('message', '')}")
-                else:
-                    logger.warning(f"Frontend client not available - would disable mic: {parameters.get('message', '')}")
+                logger.info("[STOP_LISTENING_VISUAL] Suppressed (mic control removed)")
 
             elif tool_name == "prompt_for_student_action":
                 prompt_text = parameters.get("prompt_text", "")
@@ -1503,65 +1471,6 @@ class RoxAgent(Agent):
         await self._processing_queue.put(task)
         logger.info(f"Queued task '{task_name}' for Brain processing")
 
-    async def _handle_vad_mic_off(self):
-        """Handle automatic mic turn-off detected by VAD.
-
-        This method is called when VAD detects the user has stopped speaking.
-        It immediately disables the microphone via frontend RPC.
-        """
-        logger.info("[VAD_MIC_OFF] Auto-disabling microphone after speech detection")
-
-        # Disable mic via frontend RPC
-        if self._frontend_client and self.caller_identity:
-            success = await self._frontend_client.set_mic_enabled(
-                room=self._room,
-                identity=self.caller_identity,
-                enabled=False,
-                message="Processing your input...",
-            )
-            if success:
-                logger.info(
-                    "[VAD_MIC_OFF] Successfully disabled microphone via frontend RPC"
-                )
-            else:
-                logger.warning(
-                    "[VAD_MIC_OFF] Failed to disable microphone via frontend RPC"
-                )
-        else:
-            logger.warning(
-                "[VAD_MIC_OFF] Frontend client or caller_identity not available for mic disable"
-            )
-
-    async def _process_user_speech_auto(self, transcript: str):
-        """Process user speech automatically detected by VAD.
-
-        Args:
-            transcript: The speech transcript to process
-        """
-        logger.info(f"[VAD_AUTO] Processing auto-detected speech: {transcript}")
-
-        # Disable mic via frontend RPC (idempotent / safe if already off)
-        if self._frontend_client and self.caller_identity:
-            try:
-                await self._frontend_client.set_mic_enabled(
-                    self._room,
-                    self.caller_identity,
-                    False,
-                    message="Processing your input...",
-                )
-                logger.info("[VAD_AUTO] Disabled microphone via frontend RPC")
-            except Exception as e:
-                logger.warning(f"[VAD_AUTO] Failed to disable microphone via RPC: {e}")
-
-        # Queue the transcript for LangGraph processing
-        task = {
-            "task_name": "handle_response",
-            "caller_identity": self.caller_identity,
-            "transcript": transcript,
-            "interaction_type": "vad_auto_speech",
-        }
-        await self._processing_queue.put(task)
-        logger.info("[VAD_AUTO] Queued speech transcript for Brain processing")
 
     async def _process_manual_stop_listening(self, task: Dict[str, Any]):
         """Process manual mic turn-off by user.
@@ -1650,6 +1559,14 @@ class RoxAgent(Agent):
             Dictionary containing interruption context or None if no interruption stored
         """
         return self._interrupted_plan_context
+
+    async def cleanup(self):
+        if not getattr(self, "_shutdown_recorded", False):
+            try:
+                active_agents_counter.add(-1)
+            except Exception:
+                pass
+            self._shutdown_recorded = True
 
 
 async def entrypoint(ctx: JobContext):
@@ -1917,33 +1834,7 @@ async def entrypoint(ctx: JobContext):
             encoding="linear16",
             sample_rate=24000,
         ),
-        "vad": silero.VAD.load(
-            min_silence_duration=1.0,
-            prefix_padding_duration=0.2,
-        ),
     }
-
-    # Disable heavy turn detection by default to avoid OOM in inference subprocess.
-    # Enable by setting ENABLE_TURN_DETECTION=true. If enabled, prefer the lighter English model.
-    if os.getenv("ENABLE_TURN_DETECTION", "false").lower() == "true":
-        try:
-            model_choice = os.getenv("TURN_DETECTION_MODEL", "english").lower()
-            if model_choice == "multilingual":
-                from livekit.plugins.turn_detector.multilingual import MultilingualModel as _TDModel
-            else:
-                from livekit.plugins.turn_detector.english import EnglishModel as _TDModel
-
-            session_kwargs["turn_detection"] = _TDModel(
-                unlikely_threshold=float(os.getenv("TURN_UNLIKELY_THRESHOLD", "0.1"))
-            )
-            logger.info(f"Turn detection enabled using model: {model_choice}")
-        except Exception as e:
-            logger.warning(
-                f"Failed to enable turn detection, proceeding without it: {e}",
-                exc_info=True,
-            )
-    else:
-        logger.info("Turn detection disabled (ENABLE_TURN_DETECTION=false). Using VAD-only.")
 
     main_agent_session = agents.AgentSession(**session_kwargs)
     rox_agent_instance.agent_session = main_agent_session
@@ -2013,70 +1904,7 @@ async def entrypoint(ctx: JobContext):
     except Exception:
         logger.debug("[AUTO] failed to register browser join hook", exc_info=True)
 
-    # Enhanced user state handler for VAD-based automatic mic turn-off
-    def _handle_user_state_change(ev):
-        logger.info(f"[TURN] User state changed: {ev.old_state} -> {ev.new_state}")
-
-        HANGOVER_MS = int(os.getenv("TURN_HANGOVER_MS", "900"))
-
-        # Cancel any pending turn-end if speech resumes
-        if ev.old_state == "listening" and ev.new_state == "speaking":
-            try:
-                if (
-                    rox_agent_instance._pending_turn_end_task
-                    and not rox_agent_instance._pending_turn_end_task.done()
-                ):
-                    rox_agent_instance._pending_turn_end_task.cancel()
-                    rox_agent_instance._pending_turn_end_task = None
-                    logger.info("[TURN] Cancelled pending turn-end due to resumed speech")
-            except Exception:
-                logger.debug("[TURN] Failed cancelling pending turn-end", exc_info=True)
-            return
-
-        # Schedule a delayed mic-off when user stops speaking
-        if ev.old_state == "speaking" and ev.new_state == "listening":
-            logger.info("[TURN] Scheduling mic-off after hangover")
-
-            # Cancel any prior pending task
-            try:
-                if (
-                    rox_agent_instance._pending_turn_end_task
-                    and not rox_agent_instance._pending_turn_end_task.done()
-                ):
-                    rox_agent_instance._pending_turn_end_task.cancel()
-            except Exception:
-                logger.debug("[TURN] Error cancelling old pending task", exc_info=True)
-
-            async def _delayed_end():
-                try:
-                    await asyncio.sleep(HANGOVER_MS / 1000.0)
-                    # Perform mic off and process transcript
-                    await rox_agent_instance._handle_vad_mic_off()
-
-                    transcript = ""
-                    if (
-                        hasattr(rox_agent_instance.llm_interceptor, "_buffer")
-                        and rox_agent_instance.llm_interceptor._buffer
-                    ):
-                        transcript = " ".join(rox_agent_instance.llm_interceptor._buffer)
-                        rox_agent_instance.llm_interceptor._buffer.clear()
-                        logger.info(f"[TURN] Using buffered transcript: {transcript}")
-
-                    if transcript.strip():
-                        await rox_agent_instance._process_user_speech_auto(transcript)
-                    else:
-                        logger.info("[TURN] No transcript to process after hangover")
-                except asyncio.CancelledError:
-                    logger.info("[TURN] Hangover task cancelled")
-                except Exception:
-                    logger.debug("[TURN] Hangover task error", exc_info=True)
-                finally:
-                    rox_agent_instance._pending_turn_end_task = None
-
-            rox_agent_instance._pending_turn_end_task = asyncio.create_task(_delayed_end())
-
-    # Register the VAD handler AFTER rox_agent_instance is created
-    main_agent_session.on("user_state_changed", _handle_user_state_change)
+    
 
     # --- Register RPC Handlers (The Conductor's "Ears") ---
     agent_rpc_service = AgentInteractionService()
@@ -2119,6 +1947,10 @@ async def entrypoint(ctx: JobContext):
     except Exception as e:
         logger.error(f"Failed to register RPC handlers: {e}", exc_info=True)
         try:
+            try:
+                await rox_agent_instance.cleanup()
+            except Exception:
+                pass
             otel_context.detach(_root_token)
             _root_span.end()
         except Exception:
@@ -2228,6 +2060,10 @@ async def entrypoint(ctx: JobContext):
     # Close the root span and detach context once the job ends
     try:
         try:
+            await rox_agent_instance.cleanup()
+        except Exception:
+            pass
+        try:
             handshake_task.cancel()
             with contextlib.suppress(Exception):
                 await handshake_task
@@ -2237,6 +2073,7 @@ async def entrypoint(ctx: JobContext):
         _root_span.end()
     except Exception:
         pass
+    return  # Cannot continue without RPC handlers
 
 
 # FastAPI application instance for HTTP service mode
@@ -2255,7 +2092,6 @@ except Exception as e:
 def read_root():
     """Health check endpoint"""
     return {"service": "Rox Agent Service", "status": "running"}
-
 
 @app.post("/run-agent")
 async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTasks):
@@ -2284,17 +2120,34 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
         try:
             finished_rooms = [r for r, proc in running_agents.items() if proc.poll() is not None]
             for r in finished_rooms:
-                try:
-                    del running_agents[r]
-                except Exception:
-                    pass
+                logger.info(f"Cleaning up finished agent process for room '{r}'")
+                del running_agents[r]
         except Exception:
             logger.debug("Failed to sweep finished agent processes", exc_info=True)
 
-        # Check if a process for this room is already running
+        # +++ START OF FIX: IDEMPOTENT AGENT LAUNCHER +++
+        # If a process for this room is already tracked, terminate it before starting a new one.
+        # This handles reconnects and ensures a fresh agent is always available.
         if room_name in running_agents:
-            logger.info(f"Agent process for room '{room_name}' is already running. Skipping new launch.")
-            return {"message": f"Agent for room {room_name} is already active."}
+            logger.warning(f"Request to start agent for an already tracked room '{room_name}'. Terminating the old process.")
+            try:
+                old_proc = running_agents[room_name]
+                # Politely ask the process to terminate
+                old_proc.terminate()
+                # Wait up to 5 seconds for it to shut down gracefully
+                old_proc.wait(timeout=5)
+                logger.info(f"Successfully terminated existing agent process for room '{room_name}' with PID: {old_proc.pid}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout expired while waiting for old agent process to terminate. Forcing kill.")
+                # Force kill if it doesn't respond
+                old_proc.kill()
+            except Exception as e:
+                logger.error(f"Error terminating existing agent for room '{room_name}': {e}", exc_info=True)
+            finally:
+                # Ensure the entry is removed from tracking, no matter what.
+                if room_name in running_agents:
+                    del running_agents[room_name]
+        # +++ END OF FIX +++
 
         # Define a synchronous launcher for FastAPI background task
         def _launch_agent_process():
@@ -2330,8 +2183,6 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
         background_tasks.add_task(_launch_agent_process)
         logger.info(f"Agent for room {room_name} has been scheduled to launch in a new process.")
         return {"message": f"Agent scheduled for room {room_name}"}
-
-
 
 class BrowserCommandRequest(BaseModel):
     room_name: str
