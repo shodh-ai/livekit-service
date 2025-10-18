@@ -597,13 +597,28 @@ class RoxAgent(Agent):
                     else {}
                 )
 
-                # Suggested Responses dispatch disabled; UI uses placeholders only.
+                # Suggested Responses: fire-and-forget to frontend via DataChannel
                 try:
-                    if metadata:
+                    if metadata and self._frontend_client and self._room and self.caller_identity:
                         if any(k in metadata for k in ("suggested_responses", "suggestions", "responses")):
-                            logger.info("[META] Suggested responses present in metadata; backend dispatch suppressed (UI placeholder).")
+                            # Normalize inputs: prefer rich suggestions if present, otherwise legacy strings
+                            rich = metadata.get("suggested_responses") or metadata.get("suggestions")
+                            legacy = metadata.get("responses")
+                            title = metadata.get("title") or metadata.get("suggested_title")
+                            ok = await self._frontend_client.send_suggested_responses(
+                                self._room,
+                                self.caller_identity,
+                                suggestions=rich if isinstance(rich, list) else None,
+                                title=title if isinstance(title, str) else None,
+                                group_id=str(metadata.get("group_id")) if metadata.get("group_id") is not None else None,
+                                responses=legacy if isinstance(legacy, list) else None,
+                            )
+                            if ok:
+                                logger.info("[META] Dispatched suggested responses to frontend (fire-and-forget)")
+                            else:
+                                logger.warning("[META] Failed to dispatch suggested responses to frontend")
                 except Exception:
-                    logger.debug("[META] Error while checking metadata for suggestions (suppressed)", exc_info=True)
+                    logger.debug("[META] Error while dispatching suggested responses (non-fatal)", exc_info=True)
 
                 # Reset cancellation flag AND pause flag before executing interruption response
                 # This ensures interruption responses (speak, listen, etc.) always run

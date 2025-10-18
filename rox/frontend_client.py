@@ -200,15 +200,12 @@ class FrontendClient:
         }
         
         action_type = action_type_map.get(tool_name, tool_name.upper())
-        # Set a longer timeout for potentially slow visualizations
-        _t_env = os.getenv("FRONTEND_VISUALIZATION_TIMEOUT_SEC")
-        try:
-            _vis_timeout = float(_t_env) if _t_env else 30.0
-        except Exception:
-            _vis_timeout = 30.0
-        timeout = _vis_timeout if action_type == "GENERATE_VISUALIZATION" else None
-        response = await self._send_rpc(room, identity, action_type, params, timeout_sec=timeout)
-        return response is not None and response.success
+        envelope = {
+            "type": "ui",
+            "action": action_type,
+            "parameters": params or {},
+        }
+        return await self._send_data(room, identity, envelope)
 
     async def send_suggested_responses(
         self,
@@ -234,15 +231,56 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise.
         """
-        # Suggested Responses RPC disabled. Keep UI-only placeholders on the frontend.
+        # Publish via DataChannel so the frontend's generic handler can deep-find metadata.suggested_responses
         try:
-            cnt = len(suggestions or responses or [])
-        except Exception:
-            cnt = 0
-        logger.info(
-            f"[FrontendClient] SUGGESTED_RESPONSES RPC suppressed (UI placeholder only). title={title!r}, count={cnt}"
-        )
-        return True
+            # Normalize to either array of objects with id/text/reason or array of strings
+            payload_items: Any
+            if suggestions and isinstance(suggestions, list):
+                norm_items: List[Dict[str, Any]] = []
+                for idx, s in enumerate(suggestions):
+                    try:
+                        if isinstance(s, dict):
+                            norm_items.append({
+                                "id": s.get("id") or f"s_{int(asyncio.get_event_loop().time()*1000)}_{idx}",
+                                "text": s.get("text") or str(s),
+                                "reason": s.get("reason")
+                            })
+                        else:
+                            norm_items.append({
+                                "id": f"s_{int(asyncio.get_event_loop().time()*1000)}_{idx}",
+                                "text": str(s)
+                            })
+                    except Exception:
+                        pass
+                payload_items = norm_items
+            elif responses and isinstance(responses, list):
+                payload_items = [str(r) for r in responses]
+            else:
+                payload_items = []
+
+            envelope = {
+                # type can be anything; frontend looks for metadata.suggested_responses anywhere
+                "type": "ai",
+                "metadata": {
+                    "title": title or None,
+                    "group_id": group_id or None,
+                    "suggested_responses": payload_items,
+                },
+            }
+            ok = await self._send_data(room, identity, envelope)
+            if ok:
+                try:
+                    logger.info(
+                        f"[B2F DATA] suggested_responses sent (title={title!r}, count={len(payload_items)})"
+                    )
+                except Exception:
+                    pass
+            else:
+                logger.error("[B2F DATA] suggested_responses send failed")
+            return ok
+        except Exception as e:
+            logger.error(f"Failed to send suggested responses over DataChannel: {e}", exc_info=True)
+            return False
 
     async def trigger_rrweb_replay(self, room: rtc.Room, identity: str, events_url: str) -> bool:
         """
@@ -369,20 +407,12 @@ class FrontendClient:
         else:
             params = {"elements": []}
         
-        # Use extended timeout for visualization generation
-        _t_env = os.getenv("FRONTEND_VISUALIZATION_TIMEOUT_SEC")
-        try:
-            _vis_timeout = float(_t_env) if _t_env else 30.0
-        except Exception:
-            _vis_timeout = 30.0
-        response = await self._send_rpc(
-            room,
-            identity,
-            "GENERATE_VISUALIZATION",
-            params,
-            timeout_sec=_vis_timeout,
-        )
-        return response is not None and response.success
+        envelope = {
+            "type": "ui",
+            "action": "GENERATE_VISUALIZATION",
+            "parameters": params,
+        }
+        return await self._send_data(room, identity, envelope)
 
     async def highlight_elements(self, room: rtc.Room, identity: str, element_ids: list, highlight_type: str = "attention", duration_ms: int = 3000) -> bool:
         """
