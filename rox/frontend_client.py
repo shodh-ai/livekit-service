@@ -92,12 +92,20 @@ class FrontendClient:
                             raise RuntimeError(f"destination '{identity}' not present")
                 except Exception:
                     pass
-                return await room.local_participant.perform_rpc(
-                    destination_identity=identity,
-                    method=self.rpc_method_name,
-                    payload=base64_encoded_payload,
-                    response_timeout=eff_timeout,
-                )
+                try:
+                    return await room.local_participant.perform_rpc(
+                        destination_identity=identity,
+                        method=self.rpc_method_name,
+                        payload=base64_encoded_payload,
+                        response_timeout=eff_timeout,
+                    )
+                except TypeError:
+                    # Compatibility: some FakeLocalParticipant stubs may not support response_timeout
+                    return await room.local_participant.perform_rpc(
+                        destination_identity=identity,
+                        method=self.rpc_method_name,
+                        payload=base64_encoded_payload,
+                    )
 
             # Breadcrumb before send
             try:

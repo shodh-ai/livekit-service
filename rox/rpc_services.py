@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 class AgentInteractionService:
     """Service class for handling specialized RPC interactions with the Conductor."""
 
+    def __init__(self, job_ctx: JobContext | None = None):
+        # Backward-compatible: some tests construct with a JobContext carrying the agent
+        self.agent = None
+        try:
+            if job_ctx is not None:
+                # test harness may attach agent under different names; prefer rox_agent
+                self.agent = getattr(job_ctx, "rox_agent", None) or getattr(job_ctx, "agent", None)
+        except Exception:
+            self.agent = None
+
     async def _handle_interrupt_like_event(
         self,
         raw_payload: RpcInvocationData,

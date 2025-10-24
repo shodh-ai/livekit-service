@@ -70,7 +70,7 @@ async def test_langgraph_client_success_on_first_try():
     and parses the response.
     """
     test_url = "http://fake-langgraph:8001/handle_response"
-    async with aioresponses() as m:
+    with aioresponses() as m:
         m.post(test_url, payload={
             "delivery_plan": {"actions": [{"tool_name": "speak", "parameters": {"text": "Success!"}}]},
             "current_lo_id": "lo-123",
@@ -92,7 +92,7 @@ async def test_langgraph_client_retries_on_503_error():
     Verify the client retries the request if it receives a 5xx server error.
     """
     test_url = "http://fake-langgraph:8001/handle_interruption"
-    async with aioresponses() as m:
+    with aioresponses() as m:
         # First respond with 503, then with 200 OK
         m.post(test_url, status=503)
         m.post(test_url, status=200, payload={
@@ -110,6 +110,7 @@ async def test_langgraph_client_retries_on_503_error():
         assert "Retry success!" in response["delivery_plan"]["actions"][0]["parameters"]["text"]
 
         # Verify two POST calls were made to the endpoint
-        key = ("POST", test_url)
-        assert key in m.requests
-        assert len(m.requests[key]) == 2
+        matching_keys = [k for k in m.requests.keys() if k[0] == "POST" and str(k[1]) == test_url]
+        assert matching_keys
+        total_calls = sum(len(m.requests[k]) for k in matching_keys)
+        assert total_calls == 2
