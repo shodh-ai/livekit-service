@@ -12,6 +12,7 @@ import asyncio
 import aiohttp
 import random
 from typing import Dict, Any, List, Optional
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,42 +21,41 @@ class LangGraphClient:
         # The URL should point to your new Student Tutor agent's base
 
         # Support both LANGGRAPH_TUTOR_URL and legacy LANGGRAPH_API_URL
+        settings = get_settings()
         self.base_url = (
-            os.getenv("LANGGRAPH_TUTOR_URL")
-            or os.getenv("LANGGRAPH_API_URL")
-            or os.getenv("MY_CUSTOM_AGENT_URL")
+            settings.LANGGRAPH_TUTOR_URL
+            or settings.LANGGRAPH_API_URL
+            or settings.MY_CUSTOM_AGENT_URL
             or "http://localhost:8001"
         )
 
         # Configurable HTTP timeouts
-        total_timeout = float(os.getenv("LANGGRAPH_TOTAL_TIMEOUT", "120"))
-        connect_timeout = float(os.getenv("LANGGRAPH_CONNECT_TIMEOUT", "10"))
-        sock_connect_timeout = float(
-            os.getenv("LANGGRAPH_SOCK_CONNECT_TIMEOUT", str(connect_timeout))
+        _sock_connect = (
+            float(settings.LANGGRAPH_SOCK_CONNECT_TIMEOUT)
+            if settings.LANGGRAPH_SOCK_CONNECT_TIMEOUT is not None
+            else float(settings.LANGGRAPH_CONNECT_TIMEOUT)
         )
-        sock_read_timeout = float(os.getenv("LANGGRAPH_READ_TIMEOUT", "110"))
-
         self.timeout = aiohttp.ClientTimeout(
-            total=total_timeout,
-            connect=connect_timeout,
-            sock_connect=sock_connect_timeout,
-            sock_read=sock_read_timeout,
+            total=float(settings.LANGGRAPH_TOTAL_TIMEOUT),
+            connect=float(settings.LANGGRAPH_CONNECT_TIMEOUT),
+            sock_connect=_sock_connect,
+            sock_read=float(settings.LANGGRAPH_READ_TIMEOUT),
         )
 
         # Retry configuration
-        self.max_retries = int(os.getenv("LANGGRAPH_MAX_RETRIES", "3"))
-        self.backoff_base = float(os.getenv("LANGGRAPH_BACKOFF_BASE", "1.5"))
-        self.vnc_http_url = os.getenv("VNC_LISTENER_HTTP_URL")  # e.g., http://localhost:8766
+        self.max_retries = int(settings.LANGGRAPH_MAX_RETRIES)
+        self.backoff_base = float(settings.LANGGRAPH_BACKOFF_BASE)
+        self.vnc_http_url = settings.VNC_LISTENER_HTTP_URL  # e.g., http://localhost:8766
         # New: direct HTTP server on browser pod for on-demand screenshots
-        self.browser_pod_http_url = os.getenv("BROWSER_POD_HTTP_URL")  # e.g., http://browser-pod:8777
+        self.browser_pod_http_url = settings.BROWSER_POD_HTTP_URL  # e.g., http://browser-pod:8777
         # Store reference to the RoxAgent to access rrweb_events_buffer
         self.agent = agent
         # Controls to minimize payload size
-        self.include_visual_context = os.getenv("LANGGRAPH_INCLUDE_VISUAL_CONTEXT", "true").lower() in ("1", "true", "yes")
-        self.attach_buffers = os.getenv("LANGGRAPH_ATTACH_BUFFERS", "true").lower() in ("1", "true", "yes")
+        self.include_visual_context = bool(settings.LANGGRAPH_INCLUDE_VISUAL_CONTEXT)
+        self.attach_buffers = bool(settings.LANGGRAPH_ATTACH_BUFFERS)
         # Initialization logs for diagnostics
         logger.info(
-            f"LangGraphClient base_url={self.base_url} (timeout total={total_timeout}s, connect={connect_timeout}s, sock_connect={sock_connect_timeout}s, sock_read={sock_read_timeout}s, retries={self.max_retries})"
+            f"LangGraphClient base_url={self.base_url} (timeout total={self.timeout.total}s, connect={self.timeout.connect}s, sock_connect={self.timeout.sock_connect}s, sock_read={self.timeout.sock_read}s, retries={self.max_retries})"
         )
         if self.browser_pod_http_url and self.include_visual_context:
             logger.info(f"LangGraphClient BROWSER_POD_HTTP_URL set: {self.browser_pod_http_url}")
