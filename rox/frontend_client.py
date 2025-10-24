@@ -28,13 +28,14 @@ class FrontendClient:
         if not identity or not room:
             return False
         try:
-            payload = json.dumps(envelope)
+            payload_bytes = json.dumps(envelope).encode("utf-8")
             try:
                 logger.info(f"[B2F DATA SEND] to '{identity}' type={envelope.get('type')} action={envelope.get('action')}")
             except Exception:
                 pass
             await room.local_participant.publish_data(
-                payload,
+                payload_bytes,
+                reliable=True,
                 destination_identities=[identity],
             )
             return True
@@ -284,11 +285,14 @@ class FrontendClient:
 
     async def trigger_rrweb_replay(self, room: rtc.Room, identity: str, events_url: str) -> bool:
         """
-        Send an RPC command to the frontend to start an rrweb replay from a URL.
+        Ask frontend to start an rrweb replay from a URL via DataChannel.
         """
-        params = {"events_url": events_url}
-        response = await self._send_rpc(room, identity, "RRWEB_REPLAY", params)
-        return response is not None and response.success
+        envelope = {
+            "type": "ui",
+            "action": "RRWEB_REPLAY",
+            "parameters": {"events_url": events_url},
+        }
+        return await self._send_data(room, identity, envelope)
 
     async def get_block_content_from_frontend(self, room: rtc.Room, identity: str, block_id: str, timeout_sec: float = 15.0) -> Optional[Dict[str, Any]]:
         """
@@ -303,10 +307,8 @@ class FrontendClient:
         if not block_id:
             logger.error("get_block_content_from_frontend called without block_id")
             return None
-        params = {
-            "action": "GET_BLOCK_CONTENT",
-            "block_id": block_id,
-        }
+        # This endpoint requires a response payload. Keeping RPC for this method only.
+        params = {"action": "GET_BLOCK_CONTENT", "block_id": block_id}
         try:
             logger.info(f"[RPC][Request] Fetching block content for id={block_id}")
             resp = await self._send_rpc(room, identity, "SET_UI_STATE", params, timeout_sec=timeout_sec)
@@ -341,9 +343,12 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        params = {"element_id": element_id}
-        response = await self._send_rpc(room, identity, "HIGHLIGHT_ELEMENT", params)
-        return response is not None and response.success
+        envelope = {
+            "type": "ui",
+            "action": "HIGHLIGHT_ELEMENT",
+            "parameters": {"element_id": element_id},
+        }
+        return await self._send_data(room, identity, envelope)
 
     async def speak_with_highlight(self, room: rtc.Room, identity: str, text: str, highlight_words: Optional[Dict[str, str]] = None) -> bool:
         """
@@ -379,13 +384,16 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        params = {
-            "feedback_type": feedback_type,
-            "message": message,
-            "duration_ms": duration_ms
+        envelope = {
+            "type": "ui",
+            "action": "SHOW_FEEDBACK",
+            "parameters": {
+                "feedback_type": feedback_type,
+                "message": message,
+                "duration_ms": duration_ms,
+            },
         }
-        response = await self._send_rpc(room, identity, "SHOW_FEEDBACK", params)
-        return response is not None and response.success
+        return await self._send_data(room, identity, envelope)
 
     async def generate_visualization(self, room: rtc.Room, identity: str, elements: list = None, prompt: str = None) -> bool:
         """
@@ -428,13 +436,16 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        params = {
-            "element_ids": element_ids,
-            "highlight_type": highlight_type,
-            "duration_ms": duration_ms
+        envelope = {
+            "type": "ui",
+            "action": "HIGHLIGHT_ELEMENTS",
+            "parameters": {
+                "element_ids": element_ids,
+                "highlight_type": highlight_type,
+                "duration_ms": duration_ms,
+            },
         }
-        response = await self._send_rpc(room, identity, "HIGHLIGHT_ELEMENTS", params)
-        return response is not None and response.success
+        return await self._send_data(room, identity, envelope)
 
     async def give_student_control(self, room: rtc.Room, identity: str, message: str) -> bool:
         """
@@ -448,9 +459,12 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        params = {"message": message}
-        response = await self._send_rpc(room, identity, "GIVE_STUDENT_CONTROL", params)
-        return response is not None and response.success
+        envelope = {
+            "type": "ui",
+            "action": "GIVE_STUDENT_CONTROL",
+            "parameters": {"message": message},
+        }
+        return await self._send_data(room, identity, envelope)
 
     async def take_ai_control(self, room: rtc.Room, identity: str, message: str) -> bool:
         """
@@ -464,9 +478,12 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        params = {"message": message}
-        response = await self._send_rpc(room, identity, "TAKE_AI_CONTROL", params)
-        return response is not None and response.success
+        envelope = {
+            "type": "ui",
+            "action": "TAKE_AI_CONTROL",
+            "parameters": {"message": message},
+        }
+        return await self._send_data(room, identity, envelope)
 
     async def clear_all_annotations(self, room: rtc.Room, identity: str) -> bool:
         """
@@ -479,9 +496,12 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        params = {}
-        response = await self._send_rpc(room, identity, "CLEAR_ALL_ANNOTATIONS", params)
-        return response is not None and response.success
+        envelope = {
+            "type": "ui",
+            "action": "CLEAR_ALL_ANNOTATIONS",
+            "parameters": {},
+        }
+        return await self._send_data(room, identity, envelope)
 
     async def set_mic_enabled(self, room: rtc.Room, identity: str, enabled: bool, message: str = "") -> bool:
         """

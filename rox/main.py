@@ -1064,12 +1064,10 @@ class RoxAgent(Agent):
                         )
                         if ok:
                             logger.info(
-                                "[display_visual_aid] Forwarded sanitized prompt to frontend for visualization"
+                                "[display_visual_aid] Dispatched sanitized prompt to frontend for visualization (DataChannel)"
                             )
                         else:
-                            logger.error(
-                                "[display_visual_aid] Frontend RPC returned failure for GENERATE_VISUALIZATION"
-                            )
+                            logger.error("[display_visual_aid] DataChannel dispatch failed for GENERATE_VISUALIZATION")
                     except Exception as e:
                         logger.error(
                             f"[display_visual_aid] Failed to process/forward visualization request: {e}",
