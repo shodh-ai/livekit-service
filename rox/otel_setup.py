@@ -1,4 +1,3 @@
-import os
 import logging
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
@@ -8,6 +7,7 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter as OTLPSpanExporterHTTP
 from opentelemetry.instrumentation.aiohttp_client import AioHttpClientInstrumentor
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
+from config import get_settings
 
 # HTTPX instrumentation is optional; guard import to avoid hard failure if package is absent
 try:
@@ -61,26 +61,27 @@ def _parse_attributes_env(val: str | None) -> dict:
 
 def init_tracing(service_name: str | None = None) -> None:
     """Initialize OpenTelemetry tracing and logs; support Grafana Cloud OTLP HTTP mapping."""
-    svc = service_name or os.getenv("OTEL_SERVICE_NAME", "livekit-service")
+    settings = get_settings()
+    svc = service_name or settings.OTEL_SERVICE_NAME
 
     # Resource with service name + merged OTEL_RESOURCE_ATTRIBUTES
     base_attrs = {
         "service.name": svc,
-        "service.namespace": os.getenv("OTEL_SERVICE_NAMESPACE", "rox"),
+        "service.namespace": settings.OTEL_SERVICE_NAMESPACE,
     }
-    base_attrs.update(_parse_attributes_env(os.getenv("OTEL_RESOURCE_ATTRIBUTES")))
+    base_attrs.update(_parse_attributes_env(settings.OTEL_RESOURCE_ATTRIBUTES))
     resource = Resource.create(base_attrs)
 
     # Prefer Grafana mapping if provided
-    grafana_http_traces = os.getenv("GRAFANA_OTLP_HTTP_ENDPOINT")
-    grafana_headers = _parse_headers_env(os.getenv("GRAFANA_OTLP_HEADERS"))
+    grafana_http_traces = settings.GRAFANA_OTLP_HTTP_ENDPOINT
+    grafana_headers = _parse_headers_env(settings.GRAFANA_OTLP_HEADERS)
 
-    protocol_env = os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL")
+    protocol_env = settings.OTEL_EXPORTER_OTLP_PROTOCOL
     protocol = (protocol_env or ("http/protobuf" if grafana_http_traces else "grpc")).lower()
 
-    generic_headers = _parse_headers_env(os.getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+    generic_headers = _parse_headers_env(settings.OTEL_EXPORTER_OTLP_HEADERS)
     traces_headers = (
-        _parse_headers_env(os.getenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS"))
+        _parse_headers_env(settings.OTEL_EXPORTER_OTLP_TRACES_HEADERS)
         or generic_headers
         or grafana_headers
     )
@@ -90,8 +91,8 @@ def init_tracing(service_name: str | None = None) -> None:
 
     if protocol in ("http", "http/protobuf"):
         endpoint = (
-            os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-            or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+            settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+            or settings.OTEL_EXPORTER_OTLP_ENDPOINT
             or grafana_http_traces
             or "http://localhost:4318/v1/traces"
         )
@@ -102,11 +103,11 @@ def init_tracing(service_name: str | None = None) -> None:
             pass
     else:
         endpoint = (
-            os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-            or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+            settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+            or settings.OTEL_EXPORTER_OTLP_ENDPOINT
             or "http://localhost:4317"
         )
-        insecure = os.getenv("OTEL_EXPORTER_OTLP_INSECURE", "false").lower() == "true"
+        insecure = bool(settings.OTEL_EXPORTER_OTLP_INSECURE)
         span_exporter = OTLPSpanExporterGRPC(endpoint=endpoint, insecure=insecure, headers=traces_headers or None)
         try:
             logger.info(f"OTel traces: gRPC exporter configured -> {endpoint} (insecure={insecure})")
@@ -120,14 +121,14 @@ def init_tracing(service_name: str | None = None) -> None:
     try:
         if _OTEL_LOGS_AVAILABLE:
             logs_headers = (
-                _parse_headers_env(os.getenv("OTEL_EXPORTER_OTLP_LOGS_HEADERS"))
+                _parse_headers_env(settings.OTEL_EXPORTER_OTLP_LOGS_HEADERS)
                 or generic_headers
                 or grafana_headers
             )
             if protocol in ("http", "http/protobuf"):
                 logs_endpoint = (
-                    os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-                    or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    settings.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+                    or settings.OTEL_EXPORTER_OTLP_ENDPOINT
                     or (
                         grafana_http_traces.replace("/v1/traces", "/v1/logs")
                         if grafana_http_traces and "/v1/traces" in grafana_http_traces
@@ -142,11 +143,11 @@ def init_tracing(service_name: str | None = None) -> None:
                     pass
             else:
                 logs_endpoint = (
-                    os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-                    or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    settings.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+                    or settings.OTEL_EXPORTER_OTLP_ENDPOINT
                     or "http://localhost:4317"
                 )
-                insecure_logs = os.getenv("OTEL_EXPORTER_OTLP_INSECURE", "false").lower() == "true"
+                insecure_logs = bool(settings.OTEL_EXPORTER_OTLP_INSECURE)
                 log_exporter = OTLPLogExporterGRPC(endpoint=logs_endpoint, insecure=insecure_logs, headers=logs_headers or None)
                 try:
                     logger.info(f"OTel logs: gRPC exporter configured -> {logs_endpoint} (insecure={insecure_logs})")

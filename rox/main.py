@@ -36,6 +36,7 @@ from opentelemetry import metrics
 from tracing import ensure_trace_id, set_trace_id, get_trace_id
 from logging_setup import install_logging_filter
 from pydantic import BaseModel
+from config import get_settings
 
 # FastAPI imports for HTTP service mode
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -105,15 +106,14 @@ for logger_name in noisy_loggers:
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 # +++ END OF FIX +++
 
-# Debounce window to suppress duplicate mic-enable RPCs (in seconds)
-MIC_ENABLE_DEBOUNCE_SEC = float(os.getenv("MIC_ENABLE_DEBOUNCE_SEC", "0.5"))
-
 # --- Environment Loading and Validation ---
 load_dotenv(dotenv_path=project_root / ".env")
+settings = get_settings()
+MIC_ENABLE_DEBOUNCE_SEC = float(settings.MIC_ENABLE_DEBOUNCE_SEC)
 
 # Initialize OpenTelemetry tracing for the service (global)
 try:
-    init_tracing(os.getenv("OTEL_SERVICE_NAME", "livekit-service"))
+    init_tracing(settings.OTEL_SERVICE_NAME)
 except Exception:
     pass
 
@@ -141,9 +141,12 @@ def validate_environment():
     required_env_vars = ["LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "DEEPGRAM_API_KEY"]
 
     missing_vars = []
-    for var in required_env_vars:
-        if not os.getenv(var):
-            missing_vars.append(var)
+    if not settings.LIVEKIT_API_KEY:
+        missing_vars.append("LIVEKIT_API_KEY")
+    if not settings.LIVEKIT_API_SECRET:
+        missing_vars.append("LIVEKIT_API_SECRET")
+    if not settings.DEEPGRAM_API_KEY:
+        missing_vars.append("DEEPGRAM_API_KEY")
 
     if missing_vars:
         error_msg = f"Required environment variables not set: {', '.join(missing_vars)}"
@@ -463,7 +466,7 @@ class RoxAgent(Agent):
                             and browser_pod_identity
                         ):
                             # Wait briefly for the browser pod to join the room before sending the command
-                            wait_sec = float(os.getenv("BROWSER_JOIN_WAIT_SEC", "6"))
+                            wait_sec = float(settings.BROWSER_JOIN_WAIT_SEC)
                             interval = 0.2
                             attempts = int(max(1, wait_sec / interval))
                             seen = False
@@ -487,7 +490,7 @@ class RoxAgent(Agent):
                                 )
                                 # Fallback: watch for late join and send once when present
                                 max_watch_sec = float(
-                                    os.getenv("BROWSER_JOIN_WATCH_SEC", "60")
+                                    settings.BROWSER_JOIN_WATCH_SEC
                                 )
 
                                 async def _watch_and_send():
@@ -508,7 +511,6 @@ class RoxAgent(Agent):
                                                         self._room,
                                                         browser_pod_identity,
                                                         "browser_navigate",
-
                                                     )
                                                     self._initial_nav_sent = True
                                                     logger.info(
@@ -534,8 +536,7 @@ class RoxAgent(Agent):
                                 await self._browser_pod_client.send_browser_command(
                                     self._room,
                                     browser_pod_identity,
-                                    "browser_navigate"
-                                  
+                                    "browser_navigate",
                                 )
                                 logger.info(
                                     f"[AUTO] Sent initial navigate to example.com -> {browser_pod_identity}"
@@ -1599,7 +1600,7 @@ async def entrypoint(ctx: JobContext):
     _root_token = otel_context.attach(otel_trace.set_span_in_context(_root_span))
 
     logger.info("Starting Rox Conductor entrypoint")
-    langgraph_url = os.getenv("LANGGRAPH_TUTOR_URL")
+    langgraph_url = settings.LANGGRAPH_TUTOR_URL
     logger.info(f"LANGGRAPH_TUTOR_URL environment variable: {langgraph_url}")
     # Connect to the LiveKit room
     try:
@@ -1681,7 +1682,7 @@ async def entrypoint(ctx: JobContext):
             logger.warning(f"[data_received] Failed to process packet: {e}")
 
     # --- Participant disconnect handling: delayed shutdown with grace window ---
-    student_disconnect_grace = float(os.getenv("STUDENT_DISCONNECT_GRACE_SEC", "12"))
+    student_disconnect_grace = float(settings.STUDENT_DISCONNECT_GRACE_SEC)
     student_disconnect_task: asyncio.Task | None = None
 
     async def _delayed_student_shutdown(identity: str):
@@ -1720,7 +1721,7 @@ async def entrypoint(ctx: JobContext):
     ctx.room.on("participant_disconnected", _on_participant_disconnected)
 
     # --- Startup timeout: shut down if no student joins within timeout ---
-    shutdown_timeout_seconds = int(os.getenv("ROX_NO_SHOW_TIMEOUT_SECONDS", "60"))
+    shutdown_timeout_seconds = int(settings.ROX_NO_SHOW_TIMEOUT_SECONDS)
 
     async def shutdown_if_no_student():
         logger.info(
@@ -1768,7 +1769,7 @@ async def entrypoint(ctx: JobContext):
         metadata: Dict[str, Any] = {}
 
         # 1) Prefer env override if explicitly provided
-        env_meta_str = os.getenv("STUDENT_TOKEN_METADATA")
+        env_meta_str = settings.STUDENT_TOKEN_METADATA
         if env_meta_str:
             try:
                 metadata = json.loads(env_meta_str)
@@ -1837,7 +1838,7 @@ async def entrypoint(ctx: JobContext):
         "stt": deepgram.STT(
             model="nova-2",
             language="en",
-            api_key=os.environ.get("DEEPGRAM_API_KEY"),
+            api_key=settings.DEEPGRAM_API_KEY,
             interim_results=True,
             punctuate=True,
             smart_format=True,
@@ -1845,7 +1846,7 @@ async def entrypoint(ctx: JobContext):
         "llm": rox_agent_instance.llm_interceptor,
         "tts": deepgram.TTS(
             model="aura-2-helena-en",
-            api_key=os.environ.get("DEEPGRAM_API_KEY"),
+            api_key=settings.DEEPGRAM_API_KEY,
             encoding="linear16",
             sample_rate=24000,
         ),
@@ -1918,8 +1919,6 @@ async def entrypoint(ctx: JobContext):
                 logger.debug("[AUTO] immediate send check failed", exc_info=True)
     except Exception:
         logger.debug("[AUTO] failed to register browser join hook", exc_info=True)
-
-    
 
     # --- Register RPC Handlers (The Conductor's "Ears") ---
     agent_rpc_service = AgentInteractionService()
@@ -2116,8 +2115,8 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
     """
     room_name = agent_request.room_name
     room_url = agent_request.room_url
-    api_key = os.getenv("LIVEKIT_API_KEY")
-    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    api_key = settings.LIVEKIT_API_KEY
+    api_secret = settings.LIVEKIT_API_SECRET
 
     if not all([api_key, api_secret]):
         raise HTTPException(
@@ -2227,15 +2226,15 @@ async def dev_send_browser_command(req: BrowserCommandRequest):
         params = req.parameters or {}
 
         # Resolve LiveKit URL and token
-        ws_url = req.room_url or os.getenv("LIVEKIT_URL")
+        ws_url = req.room_url or settings.LIVEKIT_URL
         token = req.token
 
         # Use a dedicated agent identity to avoid kicking the viewer (student identity)
         agent_identity = req.participant_identity or f"cmd-relay-{room_name}"
 
         if not token:
-            api_key = os.getenv("LIVEKIT_API_KEY")
-            api_secret = os.getenv("LIVEKIT_API_SECRET")
+            api_key = settings.LIVEKIT_API_KEY
+            api_secret = settings.LIVEKIT_API_SECRET
             if not (api_key and api_secret):
                 raise HTTPException(
                     status_code=500,
@@ -2351,7 +2350,7 @@ def run_fastapi_server():
     """Run the FastAPI server"""
     import uvicorn
 
-    port = int(os.getenv("PORT", "8080"))
+    port = int(settings.PORT)
     logger.info(f"Starting FastAPI server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
 

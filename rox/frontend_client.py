@@ -8,13 +8,13 @@ Handles UI state changes and visual actions.
 import logging
 import uuid
 import base64
-import os
 import json
 from typing import Dict, Any, Optional, List
 from livekit import rtc
 import asyncio
 from generated.protos import interaction_pb2
 from utils.ui_action_factory import build_ui_action_request
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +75,9 @@ class FrontendClient:
             base64_encoded_payload = base64.b64encode(payload_bytes).decode("utf-8")
 
             # Send the RPC with retries and extended timeout
-            env_default = os.getenv("FRONTEND_RPC_TIMEOUT_SEC", "15")
+            settings = get_settings()
             try:
-                default_timeout = float(env_default)
+                default_timeout = float(settings.FRONTEND_RPC_TIMEOUT_SEC)
             except Exception:
                 default_timeout = 15.0
             eff_timeout = float(timeout_sec) if (timeout_sec and timeout_sec > 0) else default_timeout

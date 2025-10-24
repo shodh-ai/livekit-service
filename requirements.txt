@@ -21,7 +21,7 @@ asyncio
 livekit-plugins-turn-detector
 # Pydantic for data validation
 pydantic
-
+pydantic-settings
 # Basic LangChain for AI functionality (minimal set)
 langchain-core
 langchain
@@ -29,7 +29,6 @@ langchain
 # Protobuf for RPC communication
 protobuf
 google-cloud-storage
-redis>=5.0.0
 opentelemetry-sdk==1.26.0
 opentelemetry-exporter-otlp==1.26.0
 opentelemetry-instrumentation-fastapi==0.47b0
