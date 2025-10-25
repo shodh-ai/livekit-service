@@ -1551,6 +1551,7 @@ class RoxAgent(Agent):
                 stable_wait_ms = 350
                 elapsed = 0
                 stable_ms = 0
+                seen_any = False
                 while elapsed < max_wait_ms:
                     await asyncio.sleep(interval_ms / 1000.0)
                     elapsed += interval_ms
@@ -1560,11 +1561,15 @@ class RoxAgent(Agent):
                         buf.clear()
                         transcript = f"{transcript} {late_chunk}".strip() if transcript else late_chunk
                         logger.info(f"[MANUAL_STOP] Late-arriving transcript captured: {late_chunk}")
+                        seen_any = True
                         stable_ms = 0
                     else:
-                        stable_ms += interval_ms
-                        if stable_ms >= stable_wait_ms:
-                            break
+                        # Only apply stability early-exit after we've seen at least one chunk
+                        if seen_any:
+                            stable_ms += interval_ms
+                            if stable_ms >= stable_wait_ms:
+                                break
+                        # else: keep waiting up to max_wait_ms for the first chunk
             except Exception:
                 logger.debug("[MANUAL_STOP] Error while waiting for late STT finals (non-fatal)", exc_info=True)
 

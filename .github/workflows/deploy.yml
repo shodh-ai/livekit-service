@@ -55,11 +55,40 @@ jobs:
 
     - name: Deploy Cloud Run Service
       run: |
-        gcloud run deploy $SERVICE_NAME \
-          --image=$REGISTRY/$PROJECT_ID/$REPOSITORY/$IMAGE_NAME:$GITHUB_SHA \
-          --region=$REGION \
+        gcloud run deploy ${{ env.SERVICE_NAME }} \
+          --image=${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+          --region=${{ env.REGION }} \
+          --project=${{ env.PROJECT_ID }} \
           --platform=managed \
           --no-allow-unauthenticated \
-          --no-cpu-throttling \
-          --project=$PROJECT_ID \
-          --update-secrets="LIVEKIT_API_KEY=LIVEKIT_API_KEY:latest,LIVEKIT_API_SECRET=LIVEKIT_API_SECRET:latest,LIVEKIT_URL=LIVEKIT_URL:latest,DEEPGRAM_API_KEY=DEEPGRAM_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,LANGGRAPH_TUTOR_URL=LANGGRAPH_TUTOR_URL:latest,OTEL_SERVICE_NAME=OTEL_SERVICE_NAME_LIVEKIT:latest,OTEL_EXPORTER_OTLP_PROTOCOL=OTEL_EXPORTER_OTLP_PROTOCOL:latest,GRAFANA_OTLP_HTTP_ENDPOINT=GRAFANA_OTLP_HTTP_ENDPOINT:latest,GRAFANA_OTLP_HEADERS=GRAFANA_OTLP_HEADERS:latest,OTEL_RESOURCE_ATTRIBUTES=OTEL_RESOURCE_ATTRIBUTES:latest,ENABLE_TURN_DETECTION=ENABLE_TURN_DETECTION:latest,TURN_DETECTION_MODEL=TURN_DETECTION_MODEL:latest,TURN_UNLIKELY_THRESHOLD=TURN_UNLIKELY_THRESHOLD:latest"
+          --update-secrets="LIVEKIT_API_KEY=LIVEKIT_API_KEY:latest,LIVEKIT_API_SECRET=LIVEKIT_API_SECRET:latest,LIVEKIT_URL=LIVEKIT_URL:latest,DEEPGRAM_API_KEY=DEEPGRAM_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,LANGGRAPH_TUTOR_URL=LANGGRAPH_TUTOR_URL:latest,OTEL_SERVICE_NAME=OTEL_SERVICE_NAME_LIVEKIT:latest,OTEL_EXPORTER_OTLP_PROTOCOL=OTEL_EXPORTER_OTLP_PROTOCOL:latest,GRAFANA_OTLP_HTTP_ENDPOINT=GRAFANA_OTLP_HTTP_ENDPOINT:latest,GRAFANA_OTLP_HEADERS=GRAFANA_OTLP_HEADERS:latest,OTEL_RESOURCE_ATTRIBUTES=OTEL_RESOURCE_ATTRIBUTES:latest,ENABLE_TURN_DETECTION=ENABLE_TURN_DETECTION:latest,TURN_DETECTION_MODEL=TURN_DETECTION_MODEL:latest,TURN_UNLIKELY_THRESHOLD=TURN_UNLIKELY_THRESHOLD:latest" \
+
+          # --- SCALABILITY CONFIGURATION START ---
+
+          # KEY CHANGE #1: Force horizontal scaling.
+          # Tells Cloud Run that each instance can only handle one session request at a time.
+          # This forces a new instance to start for each new concurrent user.
+          --concurrency=1 \
+
+          # KEY CHANGE #2: Allow the service to scale out.
+          # Sets the maximum number of instances the service can scale up to.
+          # Adjust this based on your expected peak user load and budget.
+          --max-instances=10 \
+
+          # OPTIONAL BUT RECOMMENDED: Keep one instance warm to reduce cold start latency
+          # for the first user.
+          --min-instances=1 \
+
+          # KEY CHANGE #3: Set resources for each instance.
+          # Provisions 1 vCPU for each instance. This is the minimum for "always allocated".
+          --cpu=1 \
+
+          # Set the memory for each instance. You must monitor your service to find the
+          # right value. 2Gi is a safe starting point.
+          --memory=2Gi \
+
+          # KEY CHANGE #4: Explicitly keep CPU on.
+          # This is the modern flag for --no-cpu-throttling. It ensures the popen
+          # agent process continues running even when not handling an HTTP request.
+          --cpu-allocation=cpu-always-allocated
+
