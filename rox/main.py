@@ -416,7 +416,9 @@ class RoxAgent(Agent):
                 # If the incoming task is a user-initiated action that should interrupt the AI
                 # (like clicking a suggestion or a manual interruption), trigger the interruption handler.
                 interaction_type = task.get("interaction_type")
-                if interaction_type in ["interruption", "manual_stop_listening"]:
+                # Avoid infinite loop: only route original interruption tasks, not already-forwarded ones
+                # Do NOT route manual_stop_listening here; let dedicated handler flush server-side transcript.
+                if interaction_type in ["interruption"] and not task.get("_already_forwarded"):
                     logger.info(
                         f"[INTERRUPTION] High-priority task received with interaction_type '{interaction_type}'. Triggering interruption handler."
                     )
@@ -759,6 +761,13 @@ class RoxAgent(Agent):
                 cleaned_text = text.strip()
 
                 if cleaned_text and self.agent_session:
+                    try:
+                        if self._frontend_client and self._room and self.caller_identity:
+                            speaker_label = getattr(self, "agent_display_name", None) or getattr(self, "agent_identity", None) or "AI Tutor"
+                            envelope = {"type": "transcript", "text": cleaned_text, "speaker": speaker_label}
+                            await self._frontend_client._send_data(self._room, self.caller_identity, envelope)
+                    except Exception:
+                        logger.debug("[SPEAK] Failed to send agent transcript to frontend (non-fatal)", exc_info=True)
                     try:
                         async def speak_operation():
                             playback_handle = await self.agent_session.say(
@@ -1311,6 +1320,22 @@ class RoxAgent(Agent):
         """
         logger.info(f"[INTERRUPTION] Handling interruption: {task.get('task_name')}")
 
+        # Forward any provided transcript to the frontend so the user sees their speech immediately
+        try:
+            text = task.get("transcript")
+            target_identity = task.get("caller_identity") or self.caller_identity
+            if (
+                isinstance(text, str)
+                and text.strip()
+                and self._frontend_client
+                and self._room
+                and target_identity
+            ):
+                envelope = {"type": "transcript", "text": text.strip(), "speaker": target_identity}
+                await self._frontend_client._send_data(self._room, target_identity, envelope)
+        except Exception:
+            logger.debug("[INTERRUPTION] Failed to send transcript to frontend (non-fatal)", exc_info=True)
+
         # 1. Pause current execution immediately
         self._is_paused = True
         self._current_execution_cancelled = True
@@ -1392,6 +1417,7 @@ class RoxAgent(Agent):
             **task,
             "interaction_type": "interruption",
             "interrupted_plan_context": interrupted_plan_context,
+            "_already_forwarded": True,
         }
         await self._processing_queue.put(enriched_task)
 
@@ -1517,8 +1543,40 @@ class RoxAgent(Agent):
             self.llm_interceptor._buffer.clear()
             logger.info(f"[MANUAL_STOP] Retrieved transcript from buffer: {transcript}")
 
+        # If no transcript yet, give backend STT a brief window to deliver final results
+        if not transcript.strip():
+            try:
+                max_wait_ms = 2000
+                interval_ms = 100
+                stable_wait_ms = 350
+                elapsed = 0
+                stable_ms = 0
+                while elapsed < max_wait_ms:
+                    await asyncio.sleep(interval_ms / 1000.0)
+                    elapsed += interval_ms
+                    buf = getattr(self.llm_interceptor, "_buffer", None)
+                    if buf and len(buf) > 0:
+                        late_chunk = " ".join(buf)
+                        buf.clear()
+                        transcript = f"{transcript} {late_chunk}".strip() if transcript else late_chunk
+                        logger.info(f"[MANUAL_STOP] Late-arriving transcript captured: {late_chunk}")
+                        stable_ms = 0
+                    else:
+                        stable_ms += interval_ms
+                        if stable_ms >= stable_wait_ms:
+                            break
+            except Exception:
+                logger.debug("[MANUAL_STOP] Error while waiting for late STT finals (non-fatal)", exc_info=True)
+
         # If there's transcript content, process it
         if transcript.strip():
+            try:
+                target_identity = task.get("caller_identity") or self.caller_identity
+                if self._frontend_client and self._room and target_identity:
+                    envelope = {"type": "transcript", "text": transcript, "speaker": target_identity}
+                    await self._frontend_client._send_data(self._room, target_identity, envelope)
+            except Exception:
+                logger.debug("[MANUAL_STOP] Failed to send transcript to frontend (non-fatal)", exc_info=True)
             # Queue the transcript for LangGraph processing
             response_task = {
                 "task_name": "handle_response",
@@ -1671,6 +1729,77 @@ async def entrypoint(ctx: JobContext):
             )
             payload = json.loads(payload_str)
             if isinstance(payload, dict):
+                # --- Handle frontend -> agent DataChannel tasks ---
+                p_type = str(payload.get("type") or "").strip()
+                if p_type == "agent_task":
+                    try:
+                        task_name = str(payload.get("taskName") or "").strip()
+                        task_payload = payload.get("payload") or {}
+                        if not task_name:
+                            logger.warning("[DC][agent_task] Missing taskName; ignoring packet")
+                            return
+                        # Determine caller identity best-effort
+                        caller_id = getattr(getattr(data_packet, "participant", None), "identity", None)
+                        if not caller_id:
+                            caller_id = rox_agent_instance.caller_identity
+                        # Promote text->transcript if needed (parity with RPC path)
+                        if "transcript" not in task_payload and isinstance(task_payload.get("text"), str):
+                            task_payload["transcript"] = task_payload.get("text")
+                        # Map student_spoke_or_acted to interruption/submission like RPC
+                        mapped_name = task_name
+                        if task_name == "student_spoke_or_acted":
+                            if getattr(rox_agent_instance, "_expected_user_input_type", "INTERRUPTION") == "SUBMISSION":
+                                mapped_name = "handle_submission"
+                            else:
+                                mapped_name = "handle_interruption"
+                                task_payload = {**task_payload, "interaction_type": "interruption"}
+                        elif task_name == "student_stopped_listening":
+                            # Manual mic-off: let processing loop handle flush of any backend transcript buffer
+                            mapped_name = "student_stopped_listening"
+                            task_payload = {**task_payload, "interaction_type": "manual_stop_listening"}
+                        q_task = {
+                            "task_name": mapped_name,
+                            "caller_identity": caller_id,
+                            **task_payload,
+                        }
+                        asyncio.create_task(rox_agent_instance._processing_queue.put(q_task))
+                        try:
+                            preview = {
+                                k: (v if k != "transcript" else (v[:80] + "…" if isinstance(v, str) and len(v) > 80 else v))
+                                for k, v in q_task.items()
+                                if k in ("task_name", "interaction_type", "transcript")
+                            }
+                            logger.info(f"[DC][agent_task] Enqueue: {preview}")
+                        except Exception:
+                            logger.info(f"[DC][agent_task] Enqueue: {mapped_name}")
+                        return
+                    except Exception as e:
+                        logger.error(f"[DC][agent_task] Failed to enqueue: {e}", exc_info=True)
+                elif p_type == "agent_context":
+                    try:
+                        action = str(payload.get("action") or "").upper()
+                        params = payload.get("parameters") or {}
+                        if action in ("UPDATE_AGENT_CONTEXT", "UPDATE_CONTEXT"):
+                            ctx_json = params.get("jsonContextPayload")
+                            context_payload = None
+                            try:
+                                if isinstance(ctx_json, str) and ctx_json.strip():
+                                    context_payload = json.loads(ctx_json)
+                            except Exception:
+                                context_payload = None
+                            q_task = {
+                                "task_name": "update_agent_context",
+                                "caller_identity": rox_agent_instance.caller_identity,
+                            }
+                            if isinstance(context_payload, dict):
+                                q_task["restored_feed_summary"] = context_payload.get("restored_feed_summary")
+                                q_task["context_payload"] = context_payload
+                            asyncio.create_task(rox_agent_instance._processing_queue.put(q_task))
+                            logger.info("[DC][agent_context] Enqueued UPDATE_AGENT_CONTEXT")
+                            return
+                    except Exception as e:
+                        logger.error(f"[DC][agent_context] Failed to process: {e}", exc_info=True)
+
                 # Imprinter recording packets from browser pod (event key)
                 if payload.get("source") == "rrweb" and "event" in payload:
                     rox_agent_instance.rrweb_events_buffer.append(payload["event"])  # type: ignore[arg-type]
@@ -1853,7 +1982,7 @@ async def entrypoint(ctx: JobContext):
             model="nova-2",
             language="en",
             api_key=settings.DEEPGRAM_API_KEY,
-            interim_results=True,
+            interim_results=False,
             punctuate=True,
             smart_format=True,
         ),
@@ -1991,10 +2120,18 @@ async def entrypoint(ctx: JobContext):
         await asyncio.sleep(1)
 
         if len(ctx.room.remote_participants) > 0:
-            all_identities = list(ctx.room.remote_participants.keys())
+            # Resolve identities from participant objects to avoid SID/key confusion
+            try:
+                participants = list(ctx.room.remote_participants.values())
+            except Exception:
+                participants = []
+            candidate_identities = [
+                str(getattr(p, "identity", "") or "") for p in participants
+                if str(getattr(p, "identity", "") or "")
+            ]
             # Prefer non-browser participants for caller identity
-            non_browser = [i for i in all_identities if not str(i).startswith("browser-bot-")]
-            selected_identity = (non_browser[0] if non_browser else all_identities[0])
+            non_browser = [i for i in candidate_identities if not i.startswith("browser-bot-")]
+            selected_identity = (non_browser[0] if non_browser else (candidate_identities[0] if candidate_identities else None))
             rox_agent_instance.caller_identity = selected_identity
 
             logger.info(
@@ -2008,11 +2145,14 @@ async def entrypoint(ctx: JobContext):
                 }
             )
 
-            await ctx.room.local_participant.publish_data(
-                payload=handshake_payload,
-                destination_identities=[selected_identity],
-            )
-            logger.info(f"Sent 'agent_ready' to {selected_identity}")
+            if selected_identity:
+                await ctx.room.local_participant.publish_data(
+                    payload=handshake_payload,
+                    destination_identities=[selected_identity],
+                )
+                logger.info(f"Sent 'agent_ready' to {selected_identity}")
+            else:
+                logger.warning("No suitable participant identity found for handshake; will rely on watcher")
         else:
             logger.warning(
                 "No participants in room after 1s, skipping initial handshake"
@@ -2039,8 +2179,12 @@ async def entrypoint(ctx: JobContext):
                     # Snapshot of remote participants
                     rp = getattr(ctx.room, "remote_participants", {})
                     if isinstance(rp, dict):
-                        for pid in list(rp.keys()):
-                            if str(pid).startswith("browser-bot-"):
+                        for p in list(rp.values()):
+                            try:
+                                pid = str(getattr(p, "identity", "") or "")
+                            except Exception:
+                                pid = ""
+                            if not pid or pid.startswith("browser-bot-"):
                                 continue
                             if pid not in handshaken_identities:
                                 try:
