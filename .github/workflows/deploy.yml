@@ -67,5 +67,5 @@ jobs:
           --min-instances=1 \
           --cpu=1 \
           --memory=2Gi \
-          --cpu-allocation=cpu-always-allocated
+          --no-cpu-throttling
 
