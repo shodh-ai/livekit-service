@@ -214,14 +214,57 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
 
     shutdown_task = asyncio.create_task(shutdown_if_no_student())
 
-    def _cancel_no_show_on_connect(participant: rtc.RemoteParticipant):
+    def _on_participant_connected(participant: rtc.RemoteParticipant):
+        # Cancel the no-show shutdown
         try:
             if not shutdown_task.done():
                 shutdown_task.cancel()
         except Exception:
             logger.debug("no-show cancel handler error", exc_info=True)
 
-    ctx.room.on("participant_connected", _cancel_no_show_on_connect)
+        # Set caller identity to first non-browser participant and send handshake
+        try:
+            ident = str(getattr(participant, "identity", "") or "")
+            if ident and not ident.startswith("browser-bot-"):
+                agent.caller_identity = ident
+
+                async def _send_handshake_and_maybe_start():
+                    # Best-effort handshake to frontend to kick off its flows
+                    try:
+                        payload = json.dumps({
+                            "type": "agent_ready",
+                            "agent_identity": ctx.room.local_participant.identity,
+                        })
+                        await ctx.room.local_participant.publish_data(
+                            payload=payload,
+                            destination_identities=[ident],
+                        )
+                    except Exception:
+                        logger.debug("participant_connected: handshake publish failed", exc_info=True)
+
+                    # Fallback: if frontend doesn't RPC soon, auto-enqueue start
+                    try:
+                        await asyncio.sleep(2)
+                        if not getattr(agent, "_session_started", False) and not getattr(agent, "_start_task_enqueued", False):
+                            agent._start_task_enqueued = True
+                            try:
+                                import time
+                                agent._start_task_enqueued_at = time.time()
+                            except Exception:
+                                pass
+                            await agent._processing_queue.put({
+                                "task_name": "start_tutoring_session",
+                                "caller_identity": ident,
+                            })
+                            logger.info("[participant_connected] Fallback enqueued start_tutoring_session")
+                    except Exception:
+                        logger.debug("participant_connected: fallback start enqueue failed", exc_info=True)
+
+                asyncio.create_task(_send_handshake_and_maybe_start())
+        except Exception:
+            logger.debug("participant_connected post-setup error", exc_info=True)
+
+    ctx.room.on("participant_connected", _on_participant_connected)
 
     # Initial handshake to first participant (non-browser preferred)
     async def _initial_handshake():
