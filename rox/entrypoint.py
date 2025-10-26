@@ -225,6 +225,7 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
         # Set caller identity to first non-browser participant and send handshake
         try:
             ident = str(getattr(participant, "identity", "") or "")
+            logger.info(f"participant_connected: {ident}")
             if ident and not ident.startswith("browser-bot-"):
                 agent.caller_identity = ident
 
@@ -235,10 +236,17 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                             "type": "agent_ready",
                             "agent_identity": ctx.room.local_participant.identity,
                         })
+                        # Targeted send to the connecting participant
                         await ctx.room.local_participant.publish_data(
                             payload=payload,
                             destination_identities=[ident],
                         )
+                        # Also broadcast in case the frontend isn't filtering by identity yet
+                        try:
+                            await ctx.room.local_participant.publish_data(payload=payload)
+                        except Exception:
+                            pass
+                        logger.info(f"agent_ready sent to {ident} (and broadcast)")
                     except Exception:
                         logger.debug("participant_connected: handshake publish failed", exc_info=True)
 
