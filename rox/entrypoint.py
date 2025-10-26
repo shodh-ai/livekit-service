@@ -73,10 +73,18 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
     @ctx.room.on("data_received")
     def _on_data_received(data_packet: rtc.DataPacket):
         try:
-            payload_bytes = data_packet.data
-            payload_str = (
-                payload_bytes.decode("utf-8") if isinstance(payload_bytes, (bytes, bytearray)) else str(payload_bytes)
-            )
+            raw = data_packet.data
+            if isinstance(raw, memoryview):
+                raw = bytes(raw)
+            payload_str = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+            try:
+                sender = getattr(getattr(data_packet, "participant", None), "identity", None)
+            except Exception:
+                sender = None
+            try:
+                logger.info(f"[DC][recv] from={sender or 'unknown'} size={len(payload_str)} preview={payload_str[:120]}")
+            except Exception:
+                pass
             payload = json.loads(payload_str)
             if isinstance(payload, dict):
                 p_type = str(payload.get("type") or "").strip()
@@ -85,6 +93,7 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                         task_name = str(payload.get("taskName") or "").strip()
                         task_payload = payload.get("payload") or {}
                         if not task_name:
+                            logger.info("[DC][agent_task] missing taskName; ignoring packet")
                             return
                         caller_id = getattr(getattr(data_packet, "participant", None), "identity", None) or agent.caller_identity
                         if "transcript" not in task_payload and isinstance(task_payload.get("text"), str):
@@ -100,6 +109,7 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                             mapped_name = "student_stopped_listening"
                             task_payload = {**task_payload, "interaction_type": "manual_stop_listening"}
                         q_task = {"task_name": mapped_name, "caller_identity": caller_id, **task_payload}
+                        logger.info(f"[DC][agent_task] enqueue -> {q_task.get('task_name')} from={caller_id}")
                         asyncio.create_task(agent._processing_queue.put(q_task))
                         return
                     except Exception:
@@ -120,6 +130,7 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                             if isinstance(context_payload, dict):
                                 q_task["restored_feed_summary"] = context_payload.get("restored_feed_summary")
                                 q_task["context_payload"] = context_payload
+                            logger.info("[DC][agent_context] enqueue update_agent_context")
                             asyncio.create_task(agent._processing_queue.put(q_task))
                             return
                     except Exception:
