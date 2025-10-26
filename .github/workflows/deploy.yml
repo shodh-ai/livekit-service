@@ -28,13 +28,11 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          cd livekit-service
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
       - name: Run tests
         run: |
-          cd livekit-service
           pytest -q
 
   deploy:
