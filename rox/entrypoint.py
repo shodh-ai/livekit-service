@@ -181,6 +181,59 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
             if text_parts:
                 pid = getattr(participant, "identity", None) if participant else None
                 logger.info(f"[STT:segments] {pid or 'unknown'}: {' '.join(text_parts)}")
+
+                # Route only student speech to the agent, ignore agent/bot segments
+                try:
+                    local_agent_id = getattr(ctx.room.local_participant, "identity", None)
+                except Exception:
+                    local_agent_id = None
+
+                if not pid:
+                    return
+                if local_agent_id and pid == local_agent_id:
+                    # Ignore our own TTS being transcribed
+                    return
+                if str(pid).startswith("browser-bot-"):
+                    # Ignore browser-bot STT
+                    return
+
+                # Only handle the current student's speech
+                if agent and agent.caller_identity and pid == agent.caller_identity:
+                    # Prefer final segments to avoid mid-utterance spam
+                    is_final = False
+                    try:
+                        for s in segments or []:
+                            fin = getattr(s, "is_final", None)
+                            if fin is None:
+                                fin = getattr(s, "final", None)
+                            if isinstance(fin, bool) and fin:
+                                is_final = True
+                                break
+                    except Exception:
+                        pass
+
+                    transcript_text = " ".join(text_parts)
+                    if transcript_text:
+                        # Map to expected input type
+                        mapped_name = "handle_interruption"
+                        try:
+                            if getattr(agent, "_expected_user_input_type", "INTERRUPTION") == "SUBMISSION":
+                                mapped_name = "handle_submission"
+                        except Exception:
+                            pass
+                        q_task: Dict[str, Any] = {
+                            "task_name": mapped_name,
+                            "caller_identity": pid,
+                            "transcript": transcript_text,
+                            "interaction_type": "interruption" if mapped_name == "handle_interruption" else "submission",
+                        }
+                        # If we can detect finals, only enqueue on finals; otherwise enqueue anyway.
+                        if is_final or not segments:
+                            try:
+                                logger.info(f"[STT->Agent] Enqueue {mapped_name} for {pid}")
+                                asyncio.create_task(agent._processing_queue.put(q_task))
+                            except Exception:
+                                logger.debug("failed to enqueue STT task", exc_info=True)
         except Exception:
             logger.debug("transcription_received handler error", exc_info=True)
 
