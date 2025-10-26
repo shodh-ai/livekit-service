@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rox.main import RoxAgent
+from rox.agent import RoxAgent
 from rox.langgraph_client import LangGraphClient
 from aioresponses import aioresponses
 
@@ -114,3 +114,43 @@ async def test_langgraph_client_retries_on_503_error():
         assert matching_keys
         total_calls = sum(len(m.requests[k]) for k in matching_keys)
         assert total_calls == 2
+
+
+async def test_langgraph_client_400_bad_request_no_retry():
+    """
+    Verify the client does not retry on 4xx and returns None.
+    """
+    test_url = "http://fake-langgraph:8001/handle_response"
+    with aioresponses() as m:
+        # Single 400 response
+        m.post(test_url, status=400, body="Bad Request")
+
+        client = LangGraphClient()
+        client.base_url = "http://fake-langgraph:8001"
+        client.max_retries = 5
+
+        task = {"task_name": "handle_response", "transcript": "oops"}
+        response = await client.invoke_langgraph_task(task, "user1", "curr1", "session1")
+
+        assert response is None
+        matching_keys = [k for k in m.requests.keys() if k[0] == "POST" and str(k[1]) == test_url]
+        assert matching_keys
+        total_calls = sum(len(m.requests[k]) for k in matching_keys)
+        assert total_calls == 1  # no retry on 400
+
+
+async def test_langgraph_client_missing_delivery_plan_returns_none():
+    """
+    If response JSON lacks 'delivery_plan', the client should return None.
+    """
+    test_url = "http://fake-langgraph:8001/handle_response"
+    with aioresponses() as m:
+        m.post(test_url, payload={"message": "ok but no plan"})
+
+        client = LangGraphClient()
+        client.base_url = "http://fake-langgraph:8001"
+
+        task = {"task_name": "handle_response", "transcript": "hello"}
+        response = await client.invoke_langgraph_task(task, "user1", "curr1", "session1")
+
+        assert response is None

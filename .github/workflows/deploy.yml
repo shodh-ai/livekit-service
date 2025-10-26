@@ -17,8 +17,29 @@ env:
   REPOSITORY: livekit-service
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          cd livekit-service
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run tests
+        run: |
+          cd livekit-service
+          pytest -q
+
   deploy:
     runs-on: ubuntu-latest
+    needs: [test]
     
     permissions:
       contents: read

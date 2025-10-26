@@ -43,6 +43,15 @@ class FrontendClient:
             logger.error(f"[B2F DATA FAIL] to '{identity}': {e}", exc_info=True)
             return False
 
+    async def _send_ui_action(self, room: rtc.Room, identity: str, action: str, params: Dict[str, Any]) -> bool:
+        """Helper to send a standard UI action over the data channel."""
+        envelope = {
+            "type": "ui",
+            "action": action,
+            "parameters": params or {},
+        }
+        return await self._send_data(room, identity, envelope)
+
     async def _send_rpc(self, room: rtc.Room, identity: str, action_type: str, parameters: Dict[str, Any], timeout_sec: Optional[float] = None) -> Optional[interaction_pb2.ClientUIActionResponse]:
         """
         Send an RPC call to the frontend client.
@@ -163,13 +172,7 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        envelope = {
-            "type": "ui",
-            "action": "SET_UI_STATE",
-            "parameters": params or {},
-        }
-        ok = await self._send_data(room, identity, envelope)
-        return ok
+        return await self._send_ui_action(room, identity, "SET_UI_STATE", params)
 
     async def execute_visual_action(self, room: rtc.Room, identity: str, tool_name: str, params: Dict[str, Any]) -> bool:
         """
@@ -209,12 +212,7 @@ class FrontendClient:
         }
         
         action_type = action_type_map.get(tool_name, tool_name.upper())
-        envelope = {
-            "type": "ui",
-            "action": action_type,
-            "parameters": params or {},
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, action_type, params)
 
     async def send_suggested_responses(
         self,
@@ -295,12 +293,7 @@ class FrontendClient:
         """
         Ask frontend to start an rrweb replay from a URL via DataChannel.
         """
-        envelope = {
-            "type": "ui",
-            "action": "RRWEB_REPLAY",
-            "parameters": {"events_url": events_url},
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, "RRWEB_REPLAY", {"events_url": events_url})
 
     async def get_block_content_from_frontend(self, room: rtc.Room, identity: str, block_id: str, timeout_sec: float = 15.0) -> Optional[Dict[str, Any]]:
         """
@@ -351,12 +344,7 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        envelope = {
-            "type": "ui",
-            "action": "HIGHLIGHT_ELEMENT",
-            "parameters": {"element_id": element_id},
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, "HIGHLIGHT_ELEMENT", {"element_id": element_id})
 
     async def speak_with_highlight(self, room: rtc.Room, identity: str, text: str, highlight_words: Optional[Dict[str, str]] = None) -> bool:
         """
@@ -392,16 +380,11 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        envelope = {
-            "type": "ui",
-            "action": "SHOW_FEEDBACK",
-            "parameters": {
-                "feedback_type": feedback_type,
-                "message": message,
-                "duration_ms": duration_ms,
-            },
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, "SHOW_FEEDBACK", {
+            "feedback_type": feedback_type,
+            "message": message,
+            "duration_ms": duration_ms,
+        })
 
     async def generate_visualization(self, room: rtc.Room, identity: str, elements: list = None, prompt: str = None) -> bool:
         """
@@ -423,12 +406,7 @@ class FrontendClient:
         else:
             params = {"elements": []}
         
-        envelope = {
-            "type": "ui",
-            "action": "GENERATE_VISUALIZATION",
-            "parameters": params,
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, "GENERATE_VISUALIZATION", params)
 
     async def highlight_elements(self, room: rtc.Room, identity: str, element_ids: list, highlight_type: str = "attention", duration_ms: int = 3000) -> bool:
         """
@@ -444,16 +422,11 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        envelope = {
-            "type": "ui",
-            "action": "HIGHLIGHT_ELEMENTS",
-            "parameters": {
-                "element_ids": element_ids,
-                "highlight_type": highlight_type,
-                "duration_ms": duration_ms,
-            },
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, "HIGHLIGHT_ELEMENTS", {
+            "element_ids": element_ids,
+            "highlight_type": highlight_type,
+            "duration_ms": duration_ms,
+        })
 
     async def give_student_control(self, room: rtc.Room, identity: str, message: str) -> bool:
         """
@@ -467,12 +440,7 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        envelope = {
-            "type": "ui",
-            "action": "GIVE_STUDENT_CONTROL",
-            "parameters": {"message": message},
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, "GIVE_STUDENT_CONTROL", {"message": message})
 
     async def take_ai_control(self, room: rtc.Room, identity: str, message: str) -> bool:
         """
@@ -486,12 +454,7 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        envelope = {
-            "type": "ui",
-            "action": "TAKE_AI_CONTROL",
-            "parameters": {"message": message},
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, "TAKE_AI_CONTROL", {"message": message})
 
     async def clear_all_annotations(self, room: rtc.Room, identity: str) -> bool:
         """
@@ -504,12 +467,7 @@ class FrontendClient:
         Returns:
             True if successful, False otherwise
         """
-        envelope = {
-            "type": "ui",
-            "action": "CLEAR_ALL_ANNOTATIONS",
-            "parameters": {},
-        }
-        return await self._send_data(room, identity, envelope)
+        return await self._send_ui_action(room, identity, "CLEAR_ALL_ANNOTATIONS", {})
 
     async def set_mic_enabled(self, room: rtc.Room, identity: str, enabled: bool, message: str = "") -> bool:
         """

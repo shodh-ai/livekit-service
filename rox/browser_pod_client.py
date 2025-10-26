@@ -31,6 +31,10 @@ class BrowserPodClient:
         }
         data = json.dumps(payload).encode("utf-8")
 
-        # Publish reliably so commands aren’t dropped
-        await room.local_participant.publish_data(data, reliable=True)
+        # Publish reliably and route only to the intended browser-bot identity
+        await room.local_participant.publish_data(
+            data,
+            reliable=True,
+            destination_identities=[browser_identity],
+        )
         return True

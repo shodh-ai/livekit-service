@@ -1,4 +1,5 @@
 import logging
+import os
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -59,10 +60,22 @@ def _parse_attributes_env(val: str | None) -> dict:
     return attrs
 
 
-def init_tracing(service_name: str | None = None) -> None:
-    """Initialize OpenTelemetry tracing and logs; support Grafana Cloud OTLP HTTP mapping."""
+def init_tracing(service_name: str | None = None, enable_logs: bool | None = None) -> None:
+    """Initialize OpenTelemetry tracing and optionally logs; supports Grafana Cloud OTLP HTTP mapping.
+
+    Args:
+        service_name: override OTEL service name.
+        enable_logs: if True, export std logging to OTEL; if False, skip OTel logs; if None, use env OTEL_ENABLE_LOGS (default True for workers).
+    """
     settings = get_settings()
     svc = service_name or settings.OTEL_SERVICE_NAME
+    if enable_logs is None:
+        try:
+            # Default True unless explicitly set to 'false'
+            env_val = os.environ.get("OTEL_ENABLE_LOGS", "true").strip().lower()
+            enable_logs = env_val not in ("0", "false", "no")
+        except Exception:
+            enable_logs = True
 
     # Resource with service name + merged OTEL_RESOURCE_ATTRIBUTES
     base_attrs = {
@@ -119,7 +132,7 @@ def init_tracing(service_name: str | None = None) -> None:
 
     # --- OTel Logs export (optional) ---
     try:
-        if _OTEL_LOGS_AVAILABLE:
+        if _OTEL_LOGS_AVAILABLE and enable_logs:
             logs_headers = (
                 _parse_headers_env(settings.OTEL_EXPORTER_OTLP_LOGS_HEADERS)
                 or generic_headers
@@ -156,12 +169,65 @@ def init_tracing(service_name: str | None = None) -> None:
 
             log_provider = LoggerProvider(resource=resource)
             set_logger_provider(log_provider)
-            log_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+            # Increase buffers to reduce drops under bursty logging
+            log_provider.add_log_record_processor(
+                BatchLogRecordProcessor(
+                    log_exporter,
+                    max_queue_size=4096,
+                    schedule_delay_millis=3000,
+                    export_timeout_millis=10000,
+                    max_export_batch_size=512,
+                )
+            )
 
             # Attach handler to root so std logging flows to OTel logs
             root_logger = logging.getLogger()
             if not any(isinstance(h, LoggingHandler) for h in root_logger.handlers):
-                root_logger.addHandler(LoggingHandler(level=logging.NOTSET))
+                # Export logs at INFO+ to avoid DEBUG spam in Grafana
+                root_logger.addHandler(LoggingHandler(level=logging.INFO))
+            try:
+                # Ensure INFO logs are not filtered out by a WARNING default
+                root_logger.setLevel(logging.INFO)
+            except Exception:
+                pass
+
+            # Also attach handler directly to 'rox' logger as a safety net in case
+            # third-party code replaces root handlers after init
+            rox_logger = logging.getLogger("rox")
+            if not any(isinstance(h, LoggingHandler) for h in rox_logger.handlers):
+                rox_logger.addHandler(LoggingHandler(level=logging.INFO))
+            try:
+                rox_logger.setLevel(logging.INFO)
+                rox_logger.propagate = True
+            except Exception:
+                pass
+
+            # Attach to common rox.* modules explicitly
+            for name in (
+                "rox.agent",
+                "rox.entrypoint",
+                "rox.frontend_client",
+                "rox.langgraph_client",
+                "rox.server",
+            ):
+                try:
+                    lg = logging.getLogger(name)
+                    if not any(isinstance(h, LoggingHandler) for h in lg.handlers):
+                        lg.addHandler(LoggingHandler(level=logging.INFO))
+                    lg.setLevel(logging.INFO)
+                    lg.propagate = True
+                except Exception:
+                    pass
+
+            # Attach to 'livekit' logger as well to capture its INFO logs in Grafana
+            lk_root = logging.getLogger("livekit")
+            if not any(isinstance(h, LoggingHandler) for h in lk_root.handlers):
+                lk_root.addHandler(LoggingHandler(level=logging.INFO))
+            try:
+                lk_root.setLevel(logging.INFO)
+                lk_root.propagate = True
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -176,6 +242,59 @@ def init_tracing(service_name: str | None = None) -> None:
     except Exception:
         pass
     try:
-        LoggingInstrumentor().instrument(set_logging_format=True)
+        # Do not override console formatting; we already have basicConfig.
+        LoggingInstrumentor().instrument(set_logging_format=False)
+    except Exception:
+        pass
+
+    # Tame noisy libraries to reduce console/Grafana noise
+    try:
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+    except Exception:
+        pass
+    try:
+        logging.getLogger("opentelemetry").setLevel(logging.WARNING)
+        logging.getLogger("opentelemetry.exporter").setLevel(logging.ERROR)
+        logging.getLogger("opentelemetry.instrumentation").setLevel(logging.ERROR)
+    except Exception:
+        pass
+    try:
+        logging.getLogger("asyncio").setLevel(logging.INFO)
+    except Exception:
+        pass
+    try:
+        logging.getLogger("livekit").setLevel(logging.INFO)
+        # Make sure propagation is on for both 'livekit' and 'livekit.agents'
+        try:
+            logging.getLogger("livekit").propagate = True
+            logging.getLogger("livekit.agents").propagate = True
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Normalize livekit.agents logger (dev mode sometimes adds its own handler)
+    try:
+        lk_logger = logging.getLogger("livekit.agents")
+        # Remove custom handlers (keep export via root)
+        lk_logger.handlers = []
+        lk_logger.propagate = True
+        lk_logger.setLevel(logging.INFO)
+    except Exception:
+        pass
+
+    # Deduplicate root StreamHandlers (some libs add multiple handlers to stdout/stderr)
+    try:
+        root = logging.getLogger()
+        seen = set()
+        new_handlers = []
+        for h in root.handlers:
+            key = (type(h), getattr(h, "stream", None))
+            if key in seen and hasattr(h, "stream"):
+                continue
+            seen.add(key)
+            new_handlers.append(h)
+        root.handlers = new_handlers
     except Exception:
         pass

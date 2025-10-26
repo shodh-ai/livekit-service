@@ -130,8 +130,11 @@ class AgentInteractionService:
             try:
                 payload_data = json.loads(json_payload) if json_payload else {}
             except Exception as pe:
-                logger.warning(f"InvokeAgentTask payload not valid JSON: {pe}")
-                payload_data = {}
+                logger.error(f"Invalid JSON in InvokeAgentTask.json_payload: {pe}")
+                error_response = interaction_pb2.AgentResponse(
+                    status_message=f"Invalid JSON payload: {pe}",
+                )
+                return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
             # Map selected suggestion to a transcript so it's treated like typed input
             if task_name == "select_suggested_response":

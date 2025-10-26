@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rox.main import RoxAgent
+from rox.agent import RoxAgent
 from rox.rpc_services import AgentInteractionService
 from rox.generated.protos import interaction_pb2
 
@@ -62,7 +62,7 @@ async def test_rpc_invokeagenttask_queues_task_correctly(agent):
     assert queued_task["user_name"] == "test_student"
 
 
-@patch('rox.main.LangGraphClient')
+@patch('rox.agent.LangGraphClient')
 async def test_full_interaction_loop(MockLangGraphClient, agent):
     """
     Simulates a full interaction:

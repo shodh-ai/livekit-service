@@ -12,7 +12,7 @@ ROX_DIR = THIS_DIR.parent
 if str(ROX_DIR) not in sys.path:
     sys.path.insert(0, str(ROX_DIR))
 
-from main import RoxAgent  # noqa: E402
+from agent import RoxAgent  # noqa: E402
 
 
 class StubFrontendClient:

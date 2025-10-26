@@ -221,7 +221,7 @@ sys.modules.setdefault("generated", generated_mod)
 sys.modules.setdefault("generated.protos", protos_mod)
 sys.modules.setdefault("generated.protos.interaction_pb2", interaction_pb2_mod)
 
-from rox.main import RoxAgent
+from rox.agent import RoxAgent
 
 
 class FakeFrontendClient:
