@@ -74,6 +74,20 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
     # Data channel handler (frontend -> agent)
     @ctx.room.on("data_received")
     def _on_data_received(data_packet: rtc.DataPacket):
+        # Log raw packet first for better debugging
+        raw_payload_for_log = None
+        sender_for_log = None
+        try:
+            sender_for_log = getattr(getattr(data_packet, "participant", None), "identity", "unknown")
+            raw_payload_for_log = data_packet.data
+            if isinstance(raw_payload_for_log, memoryview):
+                raw_payload_for_log = bytes(raw_payload_for_log)
+            payload_str_preview = raw_payload_for_log.decode("utf-8", errors="ignore")[:250]
+            logger.info(f"[DC][RECV_RAW] from={sender_for_log} size={len(raw_payload_for_log)} preview='{payload_str_preview}'")
+        except Exception:
+            logger.warning("[DC][RECV_RAW] Could not log raw incoming packet details.")
+
+        # Proceed with parsing and handling
         try:
             raw = data_packet.data
             if isinstance(raw, memoryview):
@@ -115,7 +129,8 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                         asyncio.create_task(agent._processing_queue.put(q_task))
                         return
                     except Exception:
-                        logger.debug("[DC][agent_task] enqueue failed", exc_info=True)
+                        # Promote to WARNING for visibility in production
+                        logger.warning("[DC][agent_task] Enqueue failed, likely due to payload format issue.", exc_info=True)
                 elif p_type == "agent_context":
                     try:
                         action = str(payload.get("action") or "").upper()
@@ -142,11 +157,14 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                 elif payload.get("source") in ("rrweb", "vscode") and "event_payload" in payload:
                     agent.live_events_buffer.append(payload)
         except Exception:
-            logger.debug("[data_received] handler error", exc_info=True)
+            # Promote to WARNING for visibility in production
+            logger.warning("[data_received] Handler error, likely failed to decode JSON.", exc_info=True)
 
     # Transcription text stream: capture 'lk.transcription' and log/user-forward
     try:
         def _on_text_stream(reader, participant_identity: str):
+            # Log attachment of text stream handler for diagnostics
+            logger.info(f"[STT] Text stream handler ATTACHED for participant: {participant_identity}")
             async def _consume():
                 try:
                     text = await reader.read_all()
@@ -164,7 +182,8 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
 
         ctx.room.register_text_stream_handler("lk.transcription", _on_text_stream)
     except Exception:
-        logger.debug("failed to register lk.transcription handler", exc_info=True)
+        # Promote to WARNING for visibility in production
+        logger.warning("Failed to register lk.transcription handler", exc_info=True)
 
     # Additionally, listen for transcription_received events (structured segments)
     @ctx.room.on("transcription_received")
@@ -181,59 +200,6 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
             if text_parts:
                 pid = getattr(participant, "identity", None) if participant else None
                 logger.info(f"[STT:segments] {pid or 'unknown'}: {' '.join(text_parts)}")
-
-                # Route only student speech to the agent, ignore agent/bot segments
-                try:
-                    local_agent_id = getattr(ctx.room.local_participant, "identity", None)
-                except Exception:
-                    local_agent_id = None
-
-                if not pid:
-                    return
-                if local_agent_id and pid == local_agent_id:
-                    # Ignore our own TTS being transcribed
-                    return
-                if str(pid).startswith("browser-bot-"):
-                    # Ignore browser-bot STT
-                    return
-
-                # Only handle the current student's speech
-                if agent and agent.caller_identity and pid == agent.caller_identity:
-                    # Prefer final segments to avoid mid-utterance spam
-                    is_final = False
-                    try:
-                        for s in segments or []:
-                            fin = getattr(s, "is_final", None)
-                            if fin is None:
-                                fin = getattr(s, "final", None)
-                            if isinstance(fin, bool) and fin:
-                                is_final = True
-                                break
-                    except Exception:
-                        pass
-
-                    transcript_text = " ".join(text_parts)
-                    if transcript_text:
-                        # Map to expected input type
-                        mapped_name = "handle_interruption"
-                        try:
-                            if getattr(agent, "_expected_user_input_type", "INTERRUPTION") == "SUBMISSION":
-                                mapped_name = "handle_submission"
-                        except Exception:
-                            pass
-                        q_task: Dict[str, Any] = {
-                            "task_name": mapped_name,
-                            "caller_identity": pid,
-                            "transcript": transcript_text,
-                            "interaction_type": "interruption" if mapped_name == "handle_interruption" else "submission",
-                        }
-                        # If we can detect finals, only enqueue on finals; otherwise enqueue anyway.
-                        if is_final or not segments:
-                            try:
-                                logger.info(f"[STT->Agent] Enqueue {mapped_name} for {pid}")
-                                asyncio.create_task(agent._processing_queue.put(q_task))
-                            except Exception:
-                                logger.debug("failed to enqueue STT task", exc_info=True)
         except Exception:
             logger.debug("transcription_received handler error", exc_info=True)
 
