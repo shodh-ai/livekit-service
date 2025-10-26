@@ -36,6 +36,7 @@ jobs:
           pytest -q
 
   deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: [test]
     
@@ -88,3 +89,9 @@ jobs:
           --memory=2Gi \
           --no-cpu-throttling
 
+    - name: Route 100% traffic to latest revision
+      run: |
+        gcloud run services update-traffic ${{ env.SERVICE_NAME }} \
+          --region=${{ env.REGION }} \
+          --project=${{ env.PROJECT_ID }} \
+          --to-latest

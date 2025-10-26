@@ -247,14 +247,15 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                             "type": "agent_ready",
                             "agent_identity": ctx.room.local_participant.identity,
                         })
+                        data = payload.encode("utf-8")
                         # Targeted send to the connecting participant
                         await ctx.room.local_participant.publish_data(
-                            payload=payload,
+                            data,
                             destination_identities=[ident],
                         )
                         # Also broadcast in case the frontend isn't filtering by identity yet
                         try:
-                            await ctx.room.local_participant.publish_data(payload=payload)
+                            await ctx.room.local_participant.publish_data(data)
                         except Exception:
                             pass
                         logger.info(f"agent_ready sent to {ident} (and broadcast)")
@@ -299,8 +300,9 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                 if non_browser:
                     selected_identity = non_browser[0]
                     agent.caller_identity = selected_identity
+                    logger.info(f"Initial handshake: Found student '{selected_identity}', sending agent_ready.")
                     handshake_payload = json.dumps({"type": "agent_ready", "agent_identity": ctx.room.local_participant.identity})
-                    await ctx.room.local_participant.publish_data(payload=handshake_payload, destination_identities=[selected_identity])
+                    await ctx.room.local_participant.publish_data(handshake_payload.encode("utf-8"), destination_identities=[selected_identity])
                 else:
                     # No student present yet; wait for participant_connected handler to send handshake
                     pass
@@ -356,6 +358,13 @@ async def entrypoint(ctx: agents.JobContext):
         except Exception:
             pass
         return
+
+    # Log agent/room identity after successful connect for diagnostics
+    try:
+        lp = getattr(ctx.room, "local_participant", None)
+        logger.info(f"Agent connected with identity: {getattr(lp, 'identity', None)} room={getattr(ctx.room, 'name', None)}")
+    except Exception:
+        pass
 
     agent = RoxAgent()
     ctx.rox_agent = agent
