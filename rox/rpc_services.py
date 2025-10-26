@@ -305,28 +305,26 @@ class AgentInteractionService:
                 logger.debug("[RPC] Failed to link RoomIO to participant (non-fatal)", exc_info=True)
 
             if not self.agent:
-                logger.error("Agent not available in TestPing handler")
                 error_response = interaction_pb2.AgentResponse(status_message="Agent not available")
                 return base64.b64encode(error_response.SerializeToString()).decode('utf-8')
 
-            # Check if the session has been started yet for this agent instance.
-            # We use the agent's internal flag to ensure this decision is made only once.
-            if not getattr(self.agent, "_session_started", False):
-                # This is the FIRST ping. The session has not started. Let's start it.
-                logger.info("[TestPing] First ping received. Enqueuing start_tutoring_session.")
-
+            # Single-start semantics: only enqueue start once.
+            if not getattr(self.agent, "_session_started", False) and not getattr(self.agent, "_start_task_enqueued", False):
+                logger.info("[TestPing] First ping received. Enqueuing start_tutoring_session (once).")
+                try:
+                    self.agent._start_task_enqueued = True
+                    import time
+                    self.agent._start_task_enqueued_at = time.time()
+                except Exception:
+                    pass
                 start_task = {
                     "task_name": "start_tutoring_session",
                     "caller_identity": pid,
                 }
                 await self.agent._processing_queue.put(start_task)
-
-
             else:
-                # The session has ALREADY started. This ping must be from a page refresh.
-                # This is where we send the "reconnect nudge" to Kamikaze.
+                # Already started or enqueued: treat as reconnect nudge
                 logger.info("[TestPing] Reconnect ping received. Enqueuing reconnect_nudge.")
-
                 reconnect_task = {
                     "task_name": "reconnect_nudge",
                     "caller_identity": pid,

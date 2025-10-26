@@ -244,6 +244,20 @@ class RoxAgent(agents.Agent):
                             task.setdefault("current_lo_id", self.current_lo_id)
                     except Exception:
                         pass
+                    # Single-start semantics: mark and dedupe start task
+                    if task_name == "start_tutoring_session":
+                        if self._session_started:
+                            logger.info("[processing_loop] Ignoring duplicate start_tutoring_session (already started)")
+                            self._processing_queue.task_done()
+                            continue
+                        # First time start: mark flags
+                        try:
+                            self._session_started = True
+                            # Clear enqueued flag now that we're executing start
+                            self._start_task_enqueued = False
+                        except Exception:
+                            pass
+
                     # Call brain
                     response = None
                     try:

@@ -69,6 +69,8 @@ async def _populate_agent_state_from_metadata(agent: RoxAgent, ctx: agents.JobCo
 
 
 async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
+    # Track identities we've already sent agent_ready to, to avoid duplicates
+    handshake_targets_sent: set[str] = set()
     # Data channel handler (frontend -> agent)
     @ctx.room.on("data_received")
     def _on_data_received(data_packet: rtc.DataPacket):
@@ -243,22 +245,21 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                 async def _send_handshake_and_maybe_start():
                     # Best-effort handshake to frontend to kick off its flows
                     try:
-                        payload = json.dumps({
-                            "type": "agent_ready",
-                            "agent_identity": ctx.room.local_participant.identity,
-                        })
-                        data = payload.encode("utf-8")
-                        # Targeted send to the connecting participant
-                        await ctx.room.local_participant.publish_data(
-                            data,
-                            destination_identities=[ident],
-                        )
-                        # Also broadcast in case the frontend isn't filtering by identity yet
-                        try:
-                            await ctx.room.local_participant.publish_data(data)
-                        except Exception:
-                            pass
-                        logger.info(f"agent_ready sent to {ident} (and broadcast)")
+                        if ident in handshake_targets_sent:
+                            logger.info(f"agent_ready already sent to {ident}; skipping duplicate")
+                        else:
+                            payload = json.dumps({
+                                "type": "agent_ready",
+                                "agent_identity": ctx.room.local_participant.identity,
+                            })
+                            data = payload.encode("utf-8")
+                            # Targeted send to the connecting participant only
+                            await ctx.room.local_participant.publish_data(
+                                data,
+                                destination_identities=[ident],
+                            )
+                            handshake_targets_sent.add(ident)
+                            logger.info(f"agent_ready sent to {ident}")
                     except Exception:
                         logger.debug("participant_connected: handshake publish failed", exc_info=True)
 
@@ -301,8 +302,12 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                     selected_identity = non_browser[0]
                     agent.caller_identity = selected_identity
                     logger.info(f"Initial handshake: Found student '{selected_identity}', sending agent_ready.")
-                    handshake_payload = json.dumps({"type": "agent_ready", "agent_identity": ctx.room.local_participant.identity})
-                    await ctx.room.local_participant.publish_data(handshake_payload.encode("utf-8"), destination_identities=[selected_identity])
+                    if selected_identity in handshake_targets_sent:
+                        logger.info(f"Initial handshake skipped; already sent to {selected_identity}")
+                    else:
+                        handshake_payload = json.dumps({"type": "agent_ready", "agent_identity": ctx.room.local_participant.identity})
+                        await ctx.room.local_participant.publish_data(handshake_payload.encode("utf-8"), destination_identities=[selected_identity])
+                        handshake_targets_sent.add(selected_identity)
                 else:
                     # No student present yet; wait for participant_connected handler to send handshake
                     pass
