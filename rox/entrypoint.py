@@ -285,7 +285,7 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
 
     ctx.room.on("participant_connected", _on_participant_connected)
 
-    # Initial handshake to first participant (non-browser preferred)
+    # Initial handshake: only target non-browser participants
     async def _initial_handshake():
         try:
             await asyncio.sleep(1)
@@ -296,11 +296,14 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                     participants = []
                 ids = [str(getattr(p, "identity", "") or "") for p in participants if str(getattr(p, "identity", "") or "")]
                 non_browser = [i for i in ids if not i.startswith("browser-bot-")]
-                selected_identity = (non_browser[0] if non_browser else (ids[0] if ids else None))
-                agent.caller_identity = selected_identity
-                handshake_payload = json.dumps({"type": "agent_ready", "agent_identity": ctx.room.local_participant.identity})
-                if selected_identity:
+                if non_browser:
+                    selected_identity = non_browser[0]
+                    agent.caller_identity = selected_identity
+                    handshake_payload = json.dumps({"type": "agent_ready", "agent_identity": ctx.room.local_participant.identity})
                     await ctx.room.local_participant.publish_data(payload=handshake_payload, destination_identities=[selected_identity])
+                else:
+                    # No student present yet; wait for participant_connected handler to send handshake
+                    pass
         except Exception:
             logger.debug("initial handshake failed", exc_info=True)
 
