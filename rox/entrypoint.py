@@ -169,15 +169,22 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                                 "to": getattr(ctx.room.local_participant, "identity", None),
                                 "from": caller_id,
                             }
-                            data = json.dumps(ack).encode("utf-8")
-                            await ctx.room.local_participant.publish_data(
-                                data,
-                                destination_identities=[caller_id] if caller_id else None,
-                                reliable=False,
-                            )
-                            logger.info(f"[DC][ACK_SENT] to={caller_id} for={mapped_name}")
+                            _ack_bytes = json.dumps(ack).encode("utf-8")
+
+                            async def _send_ack(data: bytes, dest: str | None):
+                                try:
+                                    await ctx.room.local_participant.publish_data(
+                                        data,
+                                        destination_identities=[dest] if dest else None,
+                                        reliable=False,
+                                    )
+                                    logger.info(f"[DC][ACK_SENT] to={dest} for={mapped_name}")
+                                except Exception:
+                                    logger.debug("[DC][ACK_SEND] failed", exc_info=True)
+
+                            asyncio.create_task(_send_ack(_ack_bytes, caller_id))
                         except Exception:
-                            logger.debug("[DC][ACK_SEND] failed", exc_info=True)
+                            logger.debug("[DC][ACK_PREP] failed", exc_info=True)
                         return
                     except Exception:
                         # Promote to WARNING for visibility in production
