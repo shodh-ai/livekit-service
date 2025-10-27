@@ -73,28 +73,60 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
     handshake_targets_sent: set[str] = set()
     # Data channel handler (frontend -> agent)
     @ctx.room.on("data_received")
-    def _on_data_received(data_packet: rtc.DataPacket):
+    def _on_data_received(*ev_args):
+        """
+        LiveKit Python emits data_received with signature:
+        (payload: bytes, participant: RemoteParticipant, kind: DataPacket.Kind, topic: str)
+        Older examples sometimes used a DataPacket-like object. This handler accepts both.
+        """
+        def _coerce_args(args):
+            payload = None
+            participant = None
+            kind = None
+            topic = None
+            try:
+                if len(args) == 1:
+                    obj = args[0]
+                    # DataPacket-like object
+                    payload = getattr(obj, "data", None)
+                    participant = getattr(obj, "participant", None)
+                    kind = getattr(obj, "kind", None)
+                    topic = getattr(obj, "topic", None)
+                    if isinstance(payload, memoryview):
+                        payload = bytes(payload)
+                elif len(args) >= 2:
+                    payload = args[0]
+                    participant = args[1]
+                    kind = args[2] if len(args) > 2 else None
+                    topic = args[3] if len(args) > 3 else None
+                    if isinstance(payload, memoryview):
+                        payload = bytes(payload)
+                return payload, participant, kind, topic
+            except Exception:
+                return None, None, None, None
+
+        payload_bytes, participant, kind, topic = _coerce_args(ev_args)
+
         # Log raw packet first for better debugging
-        raw_payload_for_log = None
-        sender_for_log = None
         try:
-            sender_for_log = getattr(getattr(data_packet, "participant", None), "identity", "unknown")
-            raw_payload_for_log = data_packet.data
-            if isinstance(raw_payload_for_log, memoryview):
-                raw_payload_for_log = bytes(raw_payload_for_log)
+            sender_for_log = getattr(participant, "identity", "unknown") if participant else "unknown"
+            raw_payload_for_log = payload_bytes if isinstance(payload_bytes, (bytes, bytearray)) else (payload_bytes.tobytes() if isinstance(payload_bytes, memoryview) else b"")
             payload_str_preview = raw_payload_for_log.decode("utf-8", errors="ignore")[:250]
-            logger.info(f"[DC][RECV_RAW] from={sender_for_log} size={len(raw_payload_for_log)} preview='{payload_str_preview}'")
+            logger.info(f"[DC][RECV_RAW] from={sender_for_log} size={len(raw_payload_for_log)} preview='{payload_str_preview}' topic={topic}")
         except Exception:
             logger.warning("[DC][RECV_RAW] Could not log raw incoming packet details.")
 
         # Proceed with parsing and handling
         try:
-            raw = data_packet.data
+            raw = payload_bytes
             if isinstance(raw, memoryview):
                 raw = bytes(raw)
-            payload_str = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+            if not isinstance(raw, (bytes, bytearray)):
+                logger.warning("[data_received] Unexpected payload type; dropping packet")
+                return
+            payload_str = raw.decode("utf-8", errors="replace")
             try:
-                sender = getattr(getattr(data_packet, "participant", None), "identity", None)
+                sender = getattr(participant, "identity", None) if participant else None
             except Exception:
                 sender = None
             try:
@@ -111,7 +143,7 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                         if not task_name:
                             logger.info("[DC][agent_task] missing taskName; ignoring packet")
                             return
-                        caller_id = getattr(getattr(data_packet, "participant", None), "identity", None) or agent.caller_identity
+                        caller_id = (getattr(participant, "identity", None) if participant else None) or agent.caller_identity
                         if "transcript" not in task_payload and isinstance(task_payload.get("text"), str):
                             task_payload["transcript"] = task_payload.get("text")
                         mapped_name = task_name
