@@ -159,6 +159,25 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                         q_task = {"task_name": mapped_name, "caller_identity": caller_id, **task_payload}
                         logger.info(f"[DC][agent_task] enqueue -> {q_task.get('task_name')} from={caller_id}")
                         asyncio.create_task(agent._processing_queue.put(q_task))
+                        # Send an explicit ACK back to caller for diagnostics
+                        try:
+                            ack = {
+                                "ack": True,
+                                "action": "agent_task",
+                                "ok": True,
+                                "taskName": mapped_name,
+                                "to": getattr(ctx.room.local_participant, "identity", None),
+                                "from": caller_id,
+                            }
+                            data = json.dumps(ack).encode("utf-8")
+                            await ctx.room.local_participant.publish_data(
+                                data,
+                                destination_identities=[caller_id] if caller_id else None,
+                                reliable=False,
+                            )
+                            logger.info(f"[DC][ACK_SENT] to={caller_id} for={mapped_name}")
+                        except Exception:
+                            logger.debug("[DC][ACK_SEND] failed", exc_info=True)
                         return
                     except Exception:
                         # Promote to WARNING for visibility in production
@@ -404,6 +423,32 @@ async def entrypoint(ctx: agents.JobContext):
 
     logger.info("Starting Rox Conductor entrypoint")
 
+    # Pre-connect: register text stream/transcription handlers so we don't miss early headers
+    try:
+        def _on_text_stream_pre(reader, participant_identity: str):
+            logger.info(f"[STT][PRE] Text stream handler ATTACHED for participant: {participant_identity}")
+            async def _consume():
+                try:
+                    text = await reader.read_all()
+                    if isinstance(text, str) and text.strip():
+                        logger.info(f"[STT][PRE] {participant_identity}: {text}")
+                except Exception:
+                    logger.debug("[STT][PRE] read text stream error", exc_info=True)
+            asyncio.create_task(_consume())
+
+        ctx.room.register_text_stream_handler("lk.transcription", _on_text_stream_pre)
+        logger.info("[STT][PRE] Registered lk.transcription text stream handler before connect")
+
+        @ctx.room.on("transcription_received")
+        def _on_transcription_received_pre(segments, participant, publication):
+            try:
+                pid = getattr(participant, "identity", None) if participant else None
+                logger.info(f"[STT:segments][PRE] handler attached; participant={pid}")
+            except Exception:
+                pass
+    except Exception:
+        logger.warning("Failed to register pre-connect lk.transcription handler", exc_info=True)
+
     try:
         await ctx.connect()
     except Exception as e:
@@ -419,6 +464,11 @@ async def entrypoint(ctx: agents.JobContext):
     try:
         lp = getattr(ctx.room, "local_participant", None)
         logger.info(f"Agent connected with identity: {getattr(lp, 'identity', None)} room={getattr(ctx.room, 'name', None)}")
+        try:
+            ids = list(getattr(ctx.room, 'remote_participants', {}).keys())
+            logger.info(f"Remote participants at connect: {ids}")
+        except Exception:
+            pass
     except Exception:
         pass
 
