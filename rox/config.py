@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     # Deepgram
     DEEPGRAM_API_KEY: Optional[str] = None
 
+    # TTS selection
+    TTS_PROVIDER: str = "deepgram"  # options: deepgram, gemini_native
+
+    # Gemini (Google AI for Developers) – native audio Live API
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_NATIVE_MODEL: str = "gemini-2.5-flash-native-audio-preview-09-2025"
+    GEMINI_SAMPLE_RATE: int = 24000
+    GEMINI_SYSTEM_INSTRUCTION: Optional[str] = None
+
     # OpenTelemetry / Grafana
     OTEL_SERVICE_NAME: str = "livekit-service"
     OTEL_SERVICE_NAMESPACE: str = "rox"

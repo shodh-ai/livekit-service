@@ -238,28 +238,42 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                     logger.debug("[STT] read text stream error", exc_info=True)
             asyncio.create_task(_consume())
 
-        ctx.room.register_text_stream_handler("lk.transcription", _on_text_stream)
+        if not getattr(ctx.room, "_rox_lk_transcription_registered", False):
+            ctx.room.register_text_stream_handler("lk.transcription", _on_text_stream)
+            try:
+                setattr(ctx.room, "_rox_lk_transcription_registered", True)
+            except Exception:
+                pass
+        else:
+            logger.info("[STT] lk.transcription handler already registered; skipping")
     except Exception:
         # Promote to WARNING for visibility in production
         logger.warning("Failed to register lk.transcription handler", exc_info=True)
 
     # Additionally, listen for transcription_received events (structured segments)
-    @ctx.room.on("transcription_received")
-    def _on_transcription_received(segments, participant, publication):
-        try:
-            text_parts = []
+    if not getattr(ctx.room, "_rox_transcription_received_registered", False):
+        @ctx.room.on("transcription_received")
+        def _on_transcription_received(segments, participant, publication):
             try:
-                for s in segments or []:
-                    t = getattr(s, "text", None)
-                    if isinstance(t, str) and t.strip():
-                        text_parts.append(t.strip())
+                text_parts = []
+                try:
+                    for s in segments or []:
+                        t = getattr(s, "text", None)
+                        if isinstance(t, str) and t.strip():
+                            text_parts.append(t.strip())
+                except Exception:
+                    pass
+                if text_parts:
+                    pid = getattr(participant, "identity", None) if participant else None
+                    logger.info(f"[STT:segments] {pid or 'unknown'}: {' '.join(text_parts)}")
             except Exception:
-                pass
-            if text_parts:
-                pid = getattr(participant, "identity", None) if participant else None
-                logger.info(f"[STT:segments] {pid or 'unknown'}: {' '.join(text_parts)}")
+                logger.debug("transcription_received handler error", exc_info=True)
+        try:
+            setattr(ctx.room, "_rox_transcription_received_registered", True)
         except Exception:
-            logger.debug("transcription_received handler error", exc_info=True)
+            pass
+    else:
+        logger.info("[STT] transcription_received handler already registered; skipping")
 
     # Participant disconnect -> delayed shutdown
     student_disconnect_grace = float(settings.STUDENT_DISCONNECT_GRACE_SEC)
@@ -443,16 +457,30 @@ async def entrypoint(ctx: agents.JobContext):
                     logger.debug("[STT][PRE] read text stream error", exc_info=True)
             asyncio.create_task(_consume())
 
-        ctx.room.register_text_stream_handler("lk.transcription", _on_text_stream_pre)
-        logger.info("[STT][PRE] Registered lk.transcription text stream handler before connect")
-
-        @ctx.room.on("transcription_received")
-        def _on_transcription_received_pre(segments, participant, publication):
+        if not getattr(ctx.room, "_rox_lk_transcription_registered", False):
+            ctx.room.register_text_stream_handler("lk.transcription", _on_text_stream_pre)
             try:
-                pid = getattr(participant, "identity", None) if participant else None
-                logger.info(f"[STT:segments][PRE] handler attached; participant={pid}")
+                setattr(ctx.room, "_rox_lk_transcription_registered", True)
             except Exception:
                 pass
+            logger.info("[STT][PRE] Registered lk.transcription text stream handler before connect")
+        else:
+            logger.info("[STT][PRE] lk.transcription handler already registered; skipping")
+
+        if not getattr(ctx.room, "_rox_transcription_received_registered", False):
+            @ctx.room.on("transcription_received")
+            def _on_transcription_received_pre(segments, participant, publication):
+                try:
+                    pid = getattr(participant, "identity", None) if participant else None
+                    logger.info(f"[STT:segments][PRE] handler attached; participant={pid}")
+                except Exception:
+                    pass
+            try:
+                setattr(ctx.room, "_rox_transcription_received_registered", True)
+            except Exception:
+                pass
+        else:
+            logger.info("[STT][PRE] transcription_received handler already registered; skipping")
     except Exception:
         logger.warning("Failed to register pre-connect lk.transcription handler", exc_info=True)
 
@@ -488,7 +516,35 @@ async def entrypoint(ctx: agents.JobContext):
     await _setup_room_lifecycle_events(agent, ctx)
     await _register_agent_rpc_handlers(agent, ctx)
 
-    # AgentSession with Deepgram TTS/STT and the LLM interceptor
+    # AgentSession with STT and strict TTS provider selection
+    provider = (settings.TTS_PROVIDER or "").strip().lower()
+    if provider in ("", "deepgram"):
+        tts_impl = deepgram.TTS(
+            model="aura-2-helena-en",
+            api_key=settings.DEEPGRAM_API_KEY,
+            encoding="linear16",
+            sample_rate=24000,
+        )
+    elif provider == "gemini_native":
+        try:
+            from .gemini_tts import GeminiNativeAudioTTS
+
+            tts_impl = GeminiNativeAudioTTS(
+                api_key=settings.GEMINI_API_KEY,
+                model=settings.GEMINI_NATIVE_MODEL,
+                sample_rate=int(settings.GEMINI_SAMPLE_RATE),
+                system_instruction=settings.GEMINI_SYSTEM_INSTRUCTION,
+            )
+            logger.info("Using Gemini native audio TTS provider")
+        except Exception as e:
+            logger.error(
+                f"Gemini TTS init failed; not falling back to Deepgram. Set TTS_PROVIDER=deepgram to use Deepgram. Error: {e}",
+                exc_info=True,
+            )
+            raise
+    else:
+        raise ValueError(f"Unknown TTS_PROVIDER: {provider}")
+
     session_kwargs = {
         "stt": deepgram.STT(
             model="nova-2",
@@ -499,12 +555,7 @@ async def entrypoint(ctx: agents.JobContext):
             smart_format=True,
         ),
         "llm": agent.llm_interceptor,
-        "tts": deepgram.TTS(
-            model="aura-2-helena-en",
-            api_key=settings.DEEPGRAM_API_KEY,
-            encoding="linear16",
-            sample_rate=24000,
-        ),
+        "tts": tts_impl,
     }
     agent_session = agents.AgentSession(**session_kwargs)
     agent.agent_session = agent_session
