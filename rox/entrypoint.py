@@ -205,15 +205,15 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                             if isinstance(context_payload, dict):
                                 q_task["restored_feed_summary"] = context_payload.get("restored_feed_summary")
                                 q_task["context_payload"] = context_payload
-                            logger.info("[DC][agent_context] enqueue update_agent_context")
-                            asyncio.create_task(agent._processing_queue.put(q_task))
-                            return
+                                logger.info("[DC][agent_context] enqueue update_agent_context")
+                                asyncio.create_task(agent._processing_queue.put(q_task))
+                                return
                     except Exception:
                         logger.debug("[DC][agent_context] process failed", exc_info=True)
-                if payload.get("source") == "rrweb" and "event" in payload:
-                    agent.rrweb_events_buffer.append(payload["event"])  # type: ignore[arg-type]
-                elif payload.get("source") in ("rrweb", "vscode") and "event_payload" in payload:
-                    agent.live_events_buffer.append(payload)
+                # if payload.get("source") == "rrweb" and "event" in payload:
+                #     agent.rrweb_events_buffer.append(payload["event"])  # type: ignore[arg-type]
+                #if payload.get("source") in ("rrweb", "vscode") and "event_payload" in payload:
+                #   agent.live_events_buffer.append(payload)
         except Exception:
             # Promote to WARNING for visibility in production
             logger.warning("[data_received] Handler error, likely failed to decode JSON.", exc_info=True)
