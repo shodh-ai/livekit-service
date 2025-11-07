@@ -180,6 +180,7 @@ class RoxAgent(agents.Agent):
             "vscode_highlight_add": self._execute_browser_command,
             "vscode_highlight_remove": self._execute_browser_command,
             "vscode_create_file": self._execute_browser_command,
+            "n8n_upsert_workflow_from_asset": self._execute_browser_command,
             # jupyter/frontend helpers
             "jupyter_create_new_cell": self._execute_frontend_action,
             "jupyter_scroll_to_cell": self._execute_frontend_action,
