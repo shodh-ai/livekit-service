@@ -78,6 +78,11 @@ class AgentRequest(BaseModel):
 def read_root():
     return {"service": "Rox Agent Service", "status": "running"}
 
+def _enqueue_job(queue: str, job: Dict[str, Any]) -> None:
+    if not redis_client:
+        raise RuntimeError("Redis not available")
+    redis_client.rpush(queue, json.dumps(job, separators=(",", ":")))
+
 def _launch_and_monitor_agent(
     room_name: str,
     room_url: str,
@@ -188,16 +193,21 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
         except Exception:
             pass
         with tracer.start_as_current_span("api.run_agent", attributes={"room": room_name}):
-            background_tasks.add_task(
-                _launch_and_monitor_agent,
-                room_name,
-                room_url,
-                api_key or "",
-                api_secret or "",
-                agent_request.student_token_metadata,
-                lock_key,
-                lock_value,
-            )
+            job = {
+                "type": "start_agent",
+                "room_name": room_name,
+                "room_url": room_url,
+                "api_key": api_key or "",
+                "api_secret": api_secret or "",
+                "student_token_metadata": agent_request.student_token_metadata,
+                "lock_key": lock_key,
+                "lock_value": lock_value,
+            }
+            try:
+                _enqueue_job(settings.JOB_QUEUE_GENERAL, job)
+            except Exception as e:
+                logger.error(f"Failed to enqueue job: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Failed to enqueue job")
             return {"status": "accepted", "message": f"Agent scheduled for room {room_name}"}
     else:
         try:
@@ -211,6 +221,37 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
         except Exception:
             pass
         return {"status": "no_action", "message": f"Agent is already running or starting for room {room_name}"}
+
+class RoomEvent(BaseModel):
+    room_name: str
+    event_type: str
+    payload: Optional[Dict[str, Any]] = None
+
+@app.post("/room-event")
+async def room_event(req: RoomEvent):
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Service is not connected to Redis")
+    owner_key = f"room-owner:{req.room_name}"
+    try:
+        worker_id = redis_client.get(owner_key)
+    except Exception as e:
+        logger.error(f"Failed to resolve room owner: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to resolve room owner")
+    if not worker_id:
+        raise HTTPException(status_code=404, detail="No worker owns this room")
+    queue = f"{settings.JOB_QUEUE_PREFIX}{worker_id}"
+    job = {
+        "type": "room_event",
+        "room_name": req.room_name,
+        "event_type": req.event_type,
+        "payload": req.payload or {},
+    }
+    try:
+        _enqueue_job(queue, job)
+    except Exception as e:
+        logger.error(f"Failed to enqueue room event: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to enqueue event")
+    return {"status": "accepted"}
 
 @app.get("/debug/locks")
 async def debug_list_locks():

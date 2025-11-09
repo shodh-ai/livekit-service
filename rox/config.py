@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     AGENT_LOCK_TTL_SEC: int = 300
     AGENT_LOCK_HEARTBEAT_SEC: int = 60
     ENABLE_DEBUG_LOCKS_ENDPOINT: bool = False
+    # Sticky worker architecture
+    ROOM_OWNER_TTL_SEC: int = 3600
+    JOB_QUEUE_GENERAL: str = "job-queue:general"
+    JOB_QUEUE_PREFIX: str = "job-queue:"
 
     # Deepgram
     DEEPGRAM_API_KEY: Optional[str] = None
