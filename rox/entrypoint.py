@@ -429,6 +429,7 @@ async def entrypoint(ctx: agents.JobContext):
     _root_token = otel_context.attach(otel_trace.set_span_in_context(_root_span))
 
     logger.info("Starting Rox Conductor entrypoint")
+    pre_connect_transcript_buffer = []
 
     # Pre-connect: register text stream/transcription handlers so we don't miss early headers
     try:
@@ -439,6 +440,7 @@ async def entrypoint(ctx: agents.JobContext):
                     text = await reader.read_all()
                     if isinstance(text, str) and text.strip():
                         logger.info(f"[STT][PRE] {participant_identity}: {text}")
+                        pre_connect_transcript_buffer.append(text)
                 except Exception:
                     logger.debug("[STT][PRE] read text stream error", exc_info=True)
             asyncio.create_task(_consume())
@@ -457,9 +459,27 @@ async def entrypoint(ctx: agents.JobContext):
         logger.warning("Failed to register pre-connect lk.transcription handler", exc_info=True)
 
     try:
-        await ctx.connect()
+        logger.info("Attempting to connect to LiveKit room...")
+        await asyncio.wait_for(ctx.connect(), timeout=30.0)
+        logger.info("Successfully connected to LiveKit room.")
+    except asyncio.TimeoutError:
+        logger.error("FATAL: Timed out while trying to connect to LiveKit room. Agent is shutting down.")
+        try:
+            ctx.shutdown()
+        except Exception:
+            pass
+        try:
+            otel_context.detach(_root_token)
+            _root_span.end()
+        except Exception:
+            pass
+        return
     except Exception as e:
-        logger.error(f"Failed to connect to LiveKit room: {e}", exc_info=True)
+        logger.error(f"FATAL: Failed to connect to LiveKit room: {e}", exc_info=True)
+        try:
+            ctx.shutdown()
+        except Exception:
+            pass
         try:
             otel_context.detach(_root_token)
             _root_span.end()
@@ -484,7 +504,10 @@ async def entrypoint(ctx: agents.JobContext):
     agent._room = ctx.room
     agent.session_id = ctx.room.name
 
-    await _populate_agent_state_from_metadata(agent, ctx)
+    try:
+        await _populate_agent_state_from_metadata(agent, ctx)
+    except Exception as e:
+        logger.warning(f"Could not populate metadata, proceeding with defaults. Error: {e}")
     await _setup_room_lifecycle_events(agent, ctx)
     await _register_agent_rpc_handlers(agent, ctx)
 
@@ -513,7 +536,29 @@ async def entrypoint(ctx: agents.JobContext):
         # Pass both the agent and the LiveKit room explicitly
         await agent_session.start(agent=agent, room=ctx.room)
     except Exception as e:
-        logger.error(f"Failed to start AgentSession: {e}", exc_info=True)
+        logger.error(f"FATAL: Failed to start AgentSession: {e}", exc_info=True)
+        try:
+            ctx.shutdown()
+        except Exception:
+            pass
+        try:
+            otel_context.detach(_root_token)
+            _root_span.end()
+        except Exception:
+            pass
+        return
+
+    if pre_connect_transcript_buffer:
+        full_transcript = " ".join(pre_connect_transcript_buffer)
+        logger.info(f"Processing buffered pre-connect transcript: '{full_transcript}'")
+        task = {
+            "task_name": "handle_interruption",
+            "transcript": full_transcript,
+            "caller_identity": agent.caller_identity,
+            "interaction_type": "interruption",
+        }
+        await agent._processing_queue.put(task)
+        pre_connect_transcript_buffer.clear()
 
     # Note: the main processing loop is driven externally by RPC/data events enqueuing tasks.
     # Start the processing loop as a background task for parity with previous behavior.
