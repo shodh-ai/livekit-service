@@ -429,34 +429,6 @@ async def entrypoint(ctx: agents.JobContext):
     _root_token = otel_context.attach(otel_trace.set_span_in_context(_root_span))
 
     logger.info("Starting Rox Conductor entrypoint")
-    pre_connect_transcript_buffer = []
-
-    # Pre-connect: register text stream/transcription handlers so we don't miss early headers
-    try:
-        def _on_text_stream_pre(reader, participant_identity: str):
-            logger.info(f"[STT][PRE] Text stream handler ATTACHED for participant: {participant_identity}")
-            async def _consume():
-                try:
-                    text = await reader.read_all()
-                    if isinstance(text, str) and text.strip():
-                        logger.info(f"[STT][PRE] {participant_identity}: {text}")
-                        pre_connect_transcript_buffer.append(text)
-                except Exception:
-                    logger.debug("[STT][PRE] read text stream error", exc_info=True)
-            asyncio.create_task(_consume())
-
-        ctx.room.register_text_stream_handler("lk.transcription", _on_text_stream_pre)
-        logger.info("[STT][PRE] Registered lk.transcription text stream handler before connect")
-
-        @ctx.room.on("transcription_received")
-        def _on_transcription_received_pre(segments, participant, publication):
-            try:
-                pid = getattr(participant, "identity", None) if participant else None
-                logger.info(f"[STT:segments][PRE] handler attached; participant={pid}")
-            except Exception:
-                pass
-    except Exception:
-        logger.warning("Failed to register pre-connect lk.transcription handler", exc_info=True)
 
     try:
         logger.info("Attempting to connect to LiveKit room...")
@@ -548,17 +520,7 @@ async def entrypoint(ctx: agents.JobContext):
             pass
         return
 
-    if pre_connect_transcript_buffer:
-        full_transcript = " ".join(pre_connect_transcript_buffer)
-        logger.info(f"Processing buffered pre-connect transcript: '{full_transcript}'")
-        task = {
-            "task_name": "handle_interruption",
-            "transcript": full_transcript,
-            "caller_identity": agent.caller_identity,
-            "interaction_type": "interruption",
-        }
-        await agent._processing_queue.put(task)
-        pre_connect_transcript_buffer.clear()
+    
 
     # Note: the main processing loop is driven externally by RPC/data events enqueuing tasks.
     # Start the processing loop as a background task for parity with previous behavior.
