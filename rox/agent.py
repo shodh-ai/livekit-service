@@ -14,11 +14,13 @@ try:
     from .langgraph_client import LangGraphClient
     from .frontend_client import FrontendClient
     from .browser_pod_client import BrowserPodClient
+    from .request_context import set_request_context
 except Exception:
     from config import get_settings
     from langgraph_client import LangGraphClient
     from frontend_client import FrontendClient
     from browser_pod_client import BrowserPodClient
+    from request_context import set_request_context
 from opentelemetry import metrics, trace
 
 logger = logging.getLogger(__name__)
@@ -232,21 +234,50 @@ class RoxAgent(agents.Agent):
         while True:
             try:
                 task = await self._processing_queue.get()
-                # Wrap each task handling inside a span for Grafana/OTel visibility
-                task_name = None
+                # Determine task name for logging and tracing
+                task_name: Optional[str] = None
                 try:
                     if isinstance(task, dict):
                         task_name = str(task.get("task_name") or task.get("task") or "")
                 except Exception:
                     task_name = None
 
-                with tracer.start_as_current_span("processing_loop.task", attributes={"task.name": task_name or "unknown"}):
+                # Propagate session/user context into logging contextvars
+                try:
+                    set_request_context(self.session_id, self.user_id)
+                except Exception:
+                    pass
+
+                span_name = f"agent_task.{task_name or 'unknown_task'}"
+                with tracer.start_as_current_span(span_name) as task_span:
+                    # Attach attributes for Tempo/Grafana
+                    try:
+                        task_span.set_attribute("session_id", self.session_id)
+                        task_span.set_attribute("student_id", self.user_id)
+                        task_span.set_attribute("task.name", task_name or "unknown_task")
+                        try:
+                            task_span.set_attribute("task.payload", json.dumps(task))
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                    # Structured log of the incoming task
+                    try:
+                        logger.info(
+                            f"Processing agent task: {task_name or 'unknown_task'}",
+                            extra={"json_payload": json.dumps(task)},
+                        )
+                    except Exception:
+                        logger.info(f"Processing agent task: {task_name or 'unknown_task'}")
+
                     # Attach current LO for the brain
                     try:
                         if isinstance(task, dict):
                             task.setdefault("current_lo_id", self.current_lo_id)
                     except Exception:
                         pass
+
                     # Single-start semantics: mark and dedupe start task
                     if task_name == "start_tutoring_session":
                         if self._session_started:

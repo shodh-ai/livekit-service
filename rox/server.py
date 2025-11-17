@@ -6,7 +6,7 @@ import subprocess
 import sys
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
@@ -20,6 +20,11 @@ except Exception:
     from agent import RoxAgent  # type: ignore
 from browser_pod_client import BrowserPodClient
 from config import get_settings
+try:
+    from logging_setup import install_logging_filter
+    from request_context import set_request_context
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -34,6 +39,10 @@ try:
     FastAPIInstrumentor.instrument_app(app)
 except Exception as e:
     logger.error(f"Failed to instrument FastAPI app: {e}")
+try:
+    install_logging_filter()
+except Exception:
+    pass
 
 
 class AgentRequest(BaseModel):
@@ -45,6 +54,38 @@ class AgentRequest(BaseModel):
 @app.get("/")
 def read_root():
     return {"service": "Rox Agent Service", "status": "running"}
+
+
+# Middleware to capture session/student IDs and attach to current span
+@app.middleware("http")
+async def add_context_and_trace_attributes(request: Request, call_next):
+    session_id = None
+    student_id = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            session_id = body.get("session_id") or body.get("sessionId")
+            student_id = body.get("student_id") or body.get("user_id") or body.get("studentId")
+    except Exception:
+        pass
+
+    try:
+        set_request_context(session_id, student_id)
+    except Exception:
+        pass
+
+    try:
+        span = trace.get_current_span()
+        if span and span.is_recording():
+            if session_id:
+                span.set_attribute("session_id", session_id)
+            if student_id:
+                span.set_attribute("student_id", student_id)
+    except Exception:
+        pass
+
+    response = await call_next(request)
+    return response
 
 
 @app.post("/run-agent")
