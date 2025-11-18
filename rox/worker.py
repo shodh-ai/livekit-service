@@ -89,6 +89,7 @@ def _monitor_session(client: redis.Redis, worker_id: str, room_name: str, proc: 
 
 
 def _handle_start_agent(client: redis.Redis, worker_id: str, job: Dict[str, Any]) -> None:
+    logger.info(f"Worker '{worker_id}' received start_agent job for room: {job.get('room_name')}")
     room_name = job.get("room_name")
     room_url = job.get("room_url")
     api_key = job.get("api_key", "")

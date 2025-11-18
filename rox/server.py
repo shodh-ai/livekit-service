@@ -43,6 +43,8 @@ try:
         port=redis_port,
         db=0,
         decode_responses=True,
+        socket_timeout=5,
+        socket_connect_timeout=5,
     )
     redis_client.ping()
     logger.info("Connected to Redis")
@@ -169,6 +171,16 @@ def _launch_and_monitor_agent(
 # Middleware to capture session/student IDs and attach to current span
 @app.middleware("http")
 async def add_context_and_trace_attributes(request: Request, call_next):
+    logger.info(f"HTTP {request.method} {request.url.path} starting")
+    # For /run-agent, bypass JSON parsing and context capture to avoid interfering with body handling
+    if request.url.path == "/run-agent":
+        response = await call_next(request)
+        try:
+            logger.info(f"HTTP {request.method} {request.url.path} completed status={getattr(response, 'status_code', 'unknown')}")
+        except Exception:
+            pass
+        return response
+
     session_id = None
     student_id = None
     try:
@@ -195,20 +207,24 @@ async def add_context_and_trace_attributes(request: Request, call_next):
         pass
 
     response = await call_next(request)
+    try:
+        logger.info(f"HTTP {request.method} {request.url.path} completed status={getattr(response, 'status_code', 'unknown')}")
+    except Exception:
+        pass
     return response
 
 
-@app.post("/run-agent")
-async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTasks):
+def _run_agent_sync(room_name: str, room_url: str, student_token_metadata: Optional[str]) -> Dict[str, Any]:
+    logger.info(f"/run-agent called for room_name={room_name} room_url={room_url}")
     if not redis_client:
+        logger.error("run-agent: redis_client is None")
         raise HTTPException(status_code=503, detail="Service is not connected to Redis; cannot manage agents.")
 
-    room_name = agent_request.room_name
-    room_url = agent_request.room_url
     api_key = settings.LIVEKIT_API_KEY
     api_secret = settings.LIVEKIT_API_SECRET
 
     if not all([api_key, api_secret]):
+        logger.error("run-agent: LIVEKIT_API_KEY/SECRET not set")
         raise HTTPException(status_code=500, detail="Server configuration error: LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set.")
 
     lock_key = f"agent-lock:{room_name}"
@@ -222,7 +238,9 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
     lock_value = json.dumps(lock_payload, separators=(",", ":"))
 
     try:
+        logger.info(f"run-agent: attempting to acquire lock {lock_key}")
         lock_acquired = redis_client.set(lock_key, lock_value, nx=True, ex=int(settings.AGENT_LOCK_TTL_SEC))
+        logger.info(f"run-agent: lock acquired={bool(lock_acquired)} for {lock_key}")
     except Exception as e:
         logger.error(f"Redis SET failed for key {lock_key}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to acquire lock")
@@ -240,12 +258,14 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
                 "room_url": room_url,
                 "api_key": api_key or "",
                 "api_secret": api_secret or "",
-                "student_token_metadata": agent_request.student_token_metadata,
+                "student_token_metadata": student_token_metadata,
                 "lock_key": lock_key,
                 "lock_value": lock_value,
             }
             try:
+                logger.info(f"run-agent: enqueueing job to {settings.JOB_QUEUE_GENERAL}")
                 _enqueue_job(settings.JOB_QUEUE_GENERAL, job)
+                logger.info(f"run-agent: job enqueued for room {room_name}")
             except Exception as e:
                 logger.error(f"Failed to enqueue job: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail="Failed to enqueue job")
@@ -262,6 +282,47 @@ async def run_agent(agent_request: AgentRequest, background_tasks: BackgroundTas
         except Exception:
             pass
         return {"status": "no_action", "message": f"Agent is already running or starting for room {room_name}"}
+
+
+@app.post("/run-agent")
+async def run_agent(request: Request):
+    """Schedule a LiveKit agent for a given room via Redis job queue.
+
+    This parses the JSON body, then offloads the lock/queue work to a background
+    thread via _run_agent_sync with a hard timeout, so the HTTP request cannot
+    hang indefinitely.
+    """
+    logger.info("run-agent: handler entered")
+    try:
+        raw = await request.body()
+        logger.info(f"run-agent: raw body={raw!r}")
+        body = json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception as e:
+        logger.error(f"run-agent: failed to parse JSON body: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not isinstance(body, dict):
+        logger.error(f"run-agent: body is not a JSON object: {body!r}")
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+    room_name = body.get("room_name")
+    room_url = body.get("room_url")
+    student_token_metadata = body.get("student_token_metadata")
+
+    if not room_name or not room_url:
+        logger.error(f"run-agent: missing required fields in body: {body}")
+        raise HTTPException(status_code=400, detail="Missing required fields 'room_name' or 'room_url'")
+
+    timeout_sec = 10
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_run_agent_sync, str(room_name), str(room_url), student_token_metadata),
+            timeout=timeout_sec,
+        )
+        return result
+    except asyncio.TimeoutError:
+        logger.error(f"run-agent: timed out after {timeout_sec}s")
+        raise HTTPException(status_code=500, detail="Timed out while scheduling agent")
 
 class RoomEvent(BaseModel):
     room_name: str
