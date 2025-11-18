@@ -1,6 +1,11 @@
 import logging
 import os
 from opentelemetry import trace
+from opentelemetry.metrics import set_meter_provider
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter as OTLPMetricExporterGRPC
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter as OTLPMetricExporterHTTP
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -129,6 +134,29 @@ def init_tracing(service_name: str | None = None, enable_logs: bool | None = Non
 
     provider.add_span_processor(BatchSpanProcessor(span_exporter))
     trace.set_tracer_provider(provider)
+
+    try:
+        if protocol in ("http", "http/protobuf"):
+            metrics_endpoint = (
+                settings.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+                if hasattr(settings, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") else None
+            ) or settings.OTEL_EXPORTER_OTLP_ENDPOINT or (
+                grafana_http_traces.replace("/v1/traces", "/v1/metrics") if grafana_http_traces and "/v1/traces" in grafana_http_traces else None
+            ) or "http://localhost:4318/v1/metrics"
+            metrics_exporter = OTLPMetricExporterHTTP(endpoint=metrics_endpoint, headers=(
+                _parse_headers_env(getattr(settings, "OTEL_EXPORTER_OTLP_METRICS_HEADERS", None))
+            ) or traces_headers or None)
+        else:
+            metrics_endpoint = (
+                settings.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+                if hasattr(settings, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") else None
+            ) or settings.OTEL_EXPORTER_OTLP_ENDPOINT or "http://localhost:4317"
+            metrics_exporter = OTLPMetricExporterGRPC(endpoint=metrics_endpoint, insecure=bool(settings.OTEL_EXPORTER_OTLP_INSECURE), headers=traces_headers or None)
+        reader = PeriodicExportingMetricReader(metrics_exporter)
+        mp = MeterProvider(metric_readers=[reader], resource=resource)
+        set_meter_provider(mp)
+    except Exception:
+        pass
 
     # --- OTel Logs export (optional) ---
     try:
