@@ -36,16 +36,26 @@ settings = get_settings()
 tracer = trace.get_tracer(__name__)
 
 try:
-    redis_host = settings.REDIS_HOST or os.environ.get("REDIS_HOST", "localhost")
-    redis_port = int(settings.REDIS_PORT or int(os.environ.get("REDIS_PORT", "6379")))
-    redis_client = redis.Redis(
-        host=redis_host,
-        port=redis_port,
-        db=0,
-        decode_responses=True,
-        socket_timeout=5,
-        socket_connect_timeout=5,
-    )
+    # Prefer REDIS_URL if provided (e.g. Upstash rediss:// URL); otherwise fall back
+    # to host/port for local development.
+    redis_url = settings.REDIS_URL or os.environ.get("REDIS_URL")
+    if redis_url:
+        redis_client = redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_timeout=5,
+        )
+    else:
+        redis_host = settings.REDIS_HOST or os.environ.get("REDIS_HOST", "localhost")
+        redis_port = int(settings.REDIS_PORT or int(os.environ.get("REDIS_PORT", "6379")))
+        redis_client = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            db=0,
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+        )
     redis_client.ping()
     logger.info("Connected to Redis")
 except Exception:

@@ -17,9 +17,13 @@ settings = get_settings()
 
 def _redis_client() -> Optional[redis.Redis]:
     try:
-        host = settings.REDIS_HOST or os.environ.get("REDIS_HOST", "localhost")
-        port = int(settings.REDIS_PORT or int(os.environ.get("REDIS_PORT", "6379")))
-        client = redis.Redis(host=host, port=port, db=0, decode_responses=True)
+        url = settings.REDIS_URL or os.environ.get("REDIS_URL")
+        if url:
+            client = redis.from_url(url, decode_responses=True)
+        else:
+            host = settings.REDIS_HOST or os.environ.get("REDIS_HOST", "localhost")
+            port = int(settings.REDIS_PORT or int(os.environ.get("REDIS_PORT", "6379")))
+            client = redis.Redis(host=host, port=port, db=0, decode_responses=True)
         client.ping()
         return client
     except Exception:
@@ -125,6 +129,7 @@ def run_worker() -> None:
         logger.error("Failed to register worker", exc_info=True)
         raise
     queues = [f"{settings.JOB_QUEUE_PREFIX}{worker_id}", settings.JOB_QUEUE_GENERAL]
+    logger.info(f"Worker '{worker_id}' listening on queues={queues}")
     while True:
         try:
             try:
@@ -135,9 +140,11 @@ def run_worker() -> None:
             if not item:
                 continue
             _queue, payload = item
+            logger.info(f"Worker '{worker_id}' brpop got item from queue={_queue} payload={payload}")
             try:
                 job = json.loads(payload)
             except Exception:
+                logger.error(f"Worker '{worker_id}' failed to decode job payload: {payload}")
                 continue
             typ = job.get("type")
             if typ == "start_agent":

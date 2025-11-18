@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     LANGGRAPH_ATTACH_BUFFERS: bool = True
 
     # Redis
+    # Prefer REDIS_URL (e.g. rediss://default:password@host:port/0 for Upstash).
+    # Fall back to REDIS_HOST/REDIS_PORT when URL is not provided.
+    REDIS_URL: Optional[str] = None
     REDIS_HOST: Optional[str] = None
     REDIS_PORT: int = 6379
     AGENT_LOCK_TTL_SEC: int = 300
