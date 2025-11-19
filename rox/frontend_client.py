@@ -289,11 +289,36 @@ class FrontendClient:
             logger.error(f"Failed to send suggested responses over DataChannel: {e}", exc_info=True)
             return False
 
-    async def trigger_rrweb_replay(self, room: rtc.Room, identity: str, events_url: str) -> bool:
+    async def trigger_rrweb_replay(
+        self,
+        room: rtc.Room,
+        identity: str,
+        events_url: str,
+        start_timestamp: Optional[int] = None,
+        play_duration_ms: Optional[int] = None
+    ) -> bool:
         """
         Ask frontend to start an rrweb replay from a URL via DataChannel.
+
+        Args:
+            room: LiveKit room
+            identity: Target participant identity
+            events_url: URL to fetch rrweb events from
+            start_timestamp: Optional timestamp (ms) to start playback from (RAG-controlled)
+            play_duration_ms: Optional duration (ms) to play before auto-pausing (RAG-controlled)
         """
-        return await self._send_ui_action(room, identity, "RRWEB_REPLAY", {"events_url": events_url})
+        params = {"events_url": events_url}
+
+        # Add RAG-controlled playback parameters if provided
+        if start_timestamp is not None:
+            params["start_timestamp"] = start_timestamp
+            logger.info(f"[FrontendClient] Sending rrweb with start_timestamp: {start_timestamp}ms")
+
+        if play_duration_ms is not None:
+            params["play_duration_ms"] = play_duration_ms
+            logger.info(f"[FrontendClient] Sending rrweb with play_duration_ms: {play_duration_ms}ms")
+
+        return await self._send_ui_action(room, identity, "RRWEB_REPLAY", params)
 
     async def get_block_content_from_frontend(self, room: rtc.Room, identity: str, block_id: str, timeout_sec: float = 15.0) -> Optional[Dict[str, Any]]:
         """
