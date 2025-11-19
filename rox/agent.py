@@ -224,6 +224,7 @@ class RoxAgent(agents.Agent):
             "update_excalidraw_block": self._execute_update_excalidraw_block,
             # rrweb replay
             "replay_parsed_rrweb_actions": self._execute_rrweb_replay,
+            "trigger_rrweb_replay": self._execute_trigger_rrweb_replay,
             # get content
             "get_block_content": self._execute_get_block_content,
         }
@@ -695,6 +696,44 @@ class RoxAgent(agents.Agent):
             await self._room.local_participant.publish_data(json.dumps(command).encode("utf-8"), destination_identities=[browser_identity])
         except Exception as e:
             logger.error(f"Failed to replay parsed rrweb actions: {e}", exc_info=True)
+        return (None, None)
+
+    async def _execute_trigger_rrweb_replay(self, parameters: Dict[str, Any]):
+        """
+        Handler for trigger_rrweb_replay action from kamikaze.
+        Triggers an rrweb replay on the frontend using the events_url.
+
+        Supports RAG-controlled playback with optional start_timestamp and play_duration_ms.
+        """
+        try:
+            events_url = parameters.get("events_url")
+            if not events_url:
+                logger.warning("[trigger_rrweb_replay] Missing events_url parameter")
+                return (None, None)
+
+            # Extract RAG-controlled playback parameters
+            start_timestamp = parameters.get("start_timestamp")
+            play_duration_ms = parameters.get("play_duration_ms")
+
+            if self._frontend_client and self._room and self.caller_identity:
+                log_msg = f"[trigger_rrweb_replay] Triggering replay: {events_url}"
+                if start_timestamp is not None:
+                    log_msg += f" | start_timestamp={start_timestamp}ms"
+                if play_duration_ms is not None:
+                    log_msg += f" | duration={play_duration_ms}ms"
+                logger.info(log_msg)
+
+                await self._frontend_client.trigger_rrweb_replay(
+                    self._room,
+                    self.caller_identity,
+                    events_url,
+                    start_timestamp=start_timestamp,
+                    play_duration_ms=play_duration_ms
+                )
+            else:
+                logger.warning(f"[trigger_rrweb_replay] Frontend client not available - would trigger: {events_url}")
+        except Exception as e:
+            logger.error(f"[trigger_rrweb_replay] Failed to trigger rrweb replay: {e}", exc_info=True)
         return (None, None)
 
     async def _execute_get_block_content(self, parameters: Dict[str, Any]):
