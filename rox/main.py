@@ -18,6 +18,7 @@ from livekit.agents import WorkerOptions, cli
 from rox.server import run_fastapi_server
 from rox.entrypoint import entrypoint
 from rox.otel_setup import init_tracing
+from rox.worker import run_worker
 
 # Basic logging
 logging.basicConfig(
@@ -29,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Determines whether to run the FastAPI server or the LiveKit agent."""
-    is_server = len(sys.argv) == 1 or (len(sys.argv) > 1 and sys.argv[1] == "--server")
+    arg = sys.argv[1] if len(sys.argv) > 1 else "--server"
+    is_server = arg in ("--server", "server")
+    is_worker = arg in ("--worker", "worker")
     # Initialize OpenTelemetry: disable log export in server mode to avoid force_flush timeouts
     try:
         init_tracing(enable_logs=not is_server)
@@ -38,6 +41,9 @@ def main():
     if is_server:
         logger.info("Starting in FastAPI server mode.")
         run_fastapi_server()
+    elif is_worker:
+        logger.info("Starting in Worker mode.")
+        run_worker()
     else:
         logger.info("Starting in LiveKit Agent mode.")
         try:

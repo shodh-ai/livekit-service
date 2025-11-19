@@ -42,7 +42,18 @@ class Settings(BaseSettings):
     LANGGRAPH_ATTACH_BUFFERS: bool = True
 
     # Redis
-    
+    # Prefer REDIS_URL (e.g. rediss://default:password@host:port/0 for Upstash).
+    # Fall back to REDIS_HOST/REDIS_PORT when URL is not provided.
+    REDIS_URL: Optional[str] = None
+    REDIS_HOST: Optional[str] = None
+    REDIS_PORT: int = 6379
+    AGENT_LOCK_TTL_SEC: int = 300
+    AGENT_LOCK_HEARTBEAT_SEC: int = 60
+    ENABLE_DEBUG_LOCKS_ENDPOINT: bool = False
+    # Sticky worker architecture
+    ROOM_OWNER_TTL_SEC: int = 3600
+    JOB_QUEUE_GENERAL: str = "job-queue:general"
+    JOB_QUEUE_PREFIX: str = "job-queue:"
 
     # Deepgram
     DEEPGRAM_API_KEY: Optional[str] = None
