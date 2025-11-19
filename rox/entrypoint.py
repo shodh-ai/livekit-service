@@ -107,6 +107,15 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
 
         payload_bytes, participant, kind, topic = _coerce_args(ev_args)
 
+        # Hard guard: ignore all packets coming from browser manager participants
+        try:
+            sender_identity_guard = getattr(participant, "identity", "") if participant else ""
+            if isinstance(sender_identity_guard, str) and sender_identity_guard.startswith("browser-bot-"):
+                return
+        except Exception:
+            # If we can't inspect identity, fall through and let normal handling decide
+            pass
+
         # Log raw packet first for better debugging
         try:
             sender_for_log = getattr(participant, "identity", "unknown") if participant else "unknown"
