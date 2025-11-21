@@ -37,3 +37,6 @@ opentelemetry-instrumentation-logging==0.47b0
 opentelemetry-semantic-conventions==0.47b0
 opentelemetry-instrumentation-httpx==0.47b0
 redis
+pytest-asyncio
+pytest
+aioresponses

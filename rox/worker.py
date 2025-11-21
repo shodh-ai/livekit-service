@@ -117,7 +117,7 @@ def _handle_room_event(_client: redis.Redis, _worker_id: str, _job: Dict[str, An
     return
 
 
-def run_worker() -> None:
+def _worker_main() -> None:
     client = _redis_client()
     if not client:
         raise RuntimeError("Redis not available for worker")
@@ -159,3 +159,30 @@ def run_worker() -> None:
         client.srem("active-workers", worker_id)
     except Exception:
         pass
+
+
+def _start_http_server() -> None:
+    try:
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        port = int(os.environ.get("PORT", "8080"))
+
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, format, *args):  # type: ignore[override]
+                return
+
+        server = HTTPServer(("", port), HealthHandler)
+        server.serve_forever()
+    except Exception:
+        logger.error("HTTP health server failed", exc_info=True)
+
+
+def run_worker() -> None:
+    t = threading.Thread(target=_worker_main, daemon=True)
+    t.start()
+    _start_http_server()
