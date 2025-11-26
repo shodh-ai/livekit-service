@@ -16,7 +16,10 @@ if str(ROX_DIR) not in sys.path:
     sys.path.insert(0, str(ROX_DIR))
 
 from rpc_services import AgentInteractionService  # noqa: E402
-from generated.protos import interaction_pb2  # noqa: E402
+try:
+    from rox.generated.protos import interaction_pb2  # noqa: E402
+except Exception:
+    from generated.protos import interaction_pb2  # noqa: E402
 
 
 class FakeJobCtx:

@@ -16,11 +16,11 @@ import asyncio
 try:
     from .generated.protos import interaction_pb2
     from .utils.ui_action_factory import build_ui_action_request
+    from .config import get_settings
 except Exception:
-    from generated.protos import interaction_pb2
-    from utils.ui_action_factory import build_ui_action_request
-
-from .config import get_settings
+    from rox.generated.protos import interaction_pb2
+    from rox.utils.ui_action_factory import build_ui_action_request
+    from rox.config import get_settings
 
 logger = logging.getLogger(__name__)
 
