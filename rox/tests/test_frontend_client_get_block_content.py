@@ -14,7 +14,10 @@ if str(ROX_DIR) not in sys.path:
     sys.path.insert(0, str(ROX_DIR))
 
 from frontend_client import FrontendClient  # noqa: E402
-from generated.protos import interaction_pb2  # noqa: E402
+try:
+    from rox.generated.protos import interaction_pb2  # noqa: E402
+except Exception:
+    from generated.protos import interaction_pb2  # noqa: E402
 
 
 class FakeLocalParticipant:
@@ -24,11 +27,11 @@ class FakeLocalParticipant:
 
     async def perform_rpc(self, destination_identity: str, method: str, payload: str):
         # Ignore inputs and return a serialized ClientUIActionResponse with message set to JSON
-        resp = interaction_pb2.ClientUIActionResponse(
-            request_id="test-req",
-            success=self._success,
-            message=json.dumps(self._response_json) if self._response_json is not None else "",
-        )
+        resp = interaction_pb2.ClientUIActionResponse()
+        # Set fields explicitly to avoid constructor signature differences across protobuf versions
+        resp.request_id = "test-req"
+        resp.success = self._success
+        resp.message = json.dumps(self._response_json) if self._response_json is not None else ""
         return base64.b64encode(resp.SerializeToString()).decode("utf-8")
 
 

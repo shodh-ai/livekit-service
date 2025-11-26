@@ -16,11 +16,11 @@ try:
     from .browser_pod_client import BrowserPodClient
     from .request_context import set_request_context
 except Exception:
-    from config import get_settings
-    from langgraph_client import LangGraphClient
-    from frontend_client import FrontendClient
-    from browser_pod_client import BrowserPodClient
-    from request_context import set_request_context
+    from rox.config import get_settings
+    from rox.langgraph_client import LangGraphClient
+    from rox.frontend_client import FrontendClient
+    from rox.browser_pod_client import BrowserPodClient
+    from rox.request_context import set_request_context
 from opentelemetry import metrics, trace
 
 logger = logging.getLogger(__name__)
