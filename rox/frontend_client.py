@@ -12,9 +12,15 @@ import json
 from typing import Dict, Any, Optional, List
 from livekit import rtc
 import asyncio
-from generated.protos import interaction_pb2
-from utils.ui_action_factory import build_ui_action_request
-from config import get_settings
+
+try:
+    from .generated.protos import interaction_pb2
+    from .utils.ui_action_factory import build_ui_action_request
+except Exception:
+    from generated.protos import interaction_pb2
+    from utils.ui_action_factory import build_ui_action_request
+
+from .config import get_settings
 
 logger = logging.getLogger(__name__)
 

@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rox-agent-pool
+  namespace: default
+spec:
+  # Start with 1 replica. KEDA will auto-scale this.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rox-agent
+  template:
+    metadata:
+      labels:
+        app: rox-agent
+    spec:
+      containers:
+      - name: agent
+        # This is your Python Agent image (NOT the session-manager image)
+        image: asia-south1-docker.pkg.dev/your-project/rox-agent:latest 
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: "500m"    # 0.5 vCPU reserved
+            memory: "512Mi"
+          limits:
+            cpu: "2000m"   # Burst up to 2 vCPU if needed
+            memory: "1Gi"
+        env:
+        # Standard LiveKit connection info
+        - name: LIVEKIT_URL
+          valueFrom:
+            secretKeyRef:
+              name: livekit-credentials
+              key: LIVEKIT_URL
+        - name: LIVEKIT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: livekit-credentials
+              key: LIVEKIT_API_KEY
+        - name: LIVEKIT_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: livekit-credentials
+              key: LIVEKIT_API_SECRET
+        
+        # Link to your EXISTING session-manager (Internal DNS)
+        - name: SESSION_MANAGER_URL
+          value: "http://session-manager-service.default.svc.cluster.local"

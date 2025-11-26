@@ -6,7 +6,10 @@ import uuid
 import json
 from typing import Dict, Any
 
-from generated.protos import interaction_pb2
+try:
+    from ..generated.protos import interaction_pb2
+except Exception:
+    from generated.protos import interaction_pb2
 
 logger = logging.getLogger(__name__)
 
