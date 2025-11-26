@@ -12,7 +12,11 @@ import asyncio
 import aiohttp
 import random
 from typing import Dict, Any, List, Optional
-from config import get_settings
+
+try:
+    from .config import get_settings
+except Exception:
+    from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -65,24 +69,29 @@ class LangGraphClient:
             logger.info("LangGraphClient: No browser HTTP source configured; visual_context may be omitted.")
 
     async def _fetch_visual_context(self, session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
-        """Optionally fetch a screenshot from the browser pod HTTP endpoint; fallback to VNC listener.
+        """Optionally fetch a screenshot from the browser pod HTTP endpoint using the
+        dynamic URL attached to the RoxAgent instance.
 
         Returns None if not configured or on failure.
         """
-        url = None
-        source = None
         if not self.include_visual_context:
             logger.debug("Visual context disabled via LANGGRAPH_INCLUDE_VISUAL_CONTEXT=false")
             return None
-        if self.browser_pod_http_url:
-            url = self.browser_pod_http_url.rstrip('/') + "/screenshot"
-            source = "browser_pod"
-        elif self.vnc_http_url:
-            url = self.vnc_http_url.rstrip('/') + "/screenshot"
-            source = "vnc_listener"
-        else:
-            logger.debug("No browser HTTP URL configured; skipping visual context fetch.")
+
+        # CHANGE: Use the dynamic URL from the agent instance, not static env configuration.
+        base_url = None
+        try:
+            if getattr(self, "agent", None) is not None:
+                base_url = getattr(self.agent, "browser_http_url", None)
+        except Exception:
+            base_url = None
+
+        if not base_url:
+            logger.debug("No dynamic browser_http_url found on agent; skipping visual context fetch.")
             return None
+
+        url = base_url.rstrip("/") + "/screenshot"
+
         try:
             logger.debug(f"Fetching visual context from: {url}")
             async with session.get(url) as resp:
@@ -102,11 +111,15 @@ class LangGraphClient:
                 b64_len = len(b64)
                 b64_preview = b64[:60]
                 if success is None:
-                    logger.info(f"Fetched screenshot (no 'success' flag present) len={b64_len} preview={b64_preview}...")
+                    logger.info(
+                        f"Fetched screenshot (no 'success' flag present) len={b64_len} preview={b64_preview}..."
+                    )
                 else:
-                    logger.info(f"Fetched screenshot_b64 len={b64_len} preview={b64_preview}...")
+                    logger.info(
+                        f"Fetched screenshot_b64 len={b64_len} preview={b64_preview}..."
+                    )
                 return {
-                    "source": source or "browser_pod",
+                    "source": "browser_pod",
                     "screenshot_b64": b64,
                     "page_url": data.get("url"),
                     "captured_at": data.get("timestamp"),

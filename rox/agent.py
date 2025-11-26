@@ -116,6 +116,8 @@ class RoxAgent(agents.Agent):
         # State
         self.user_id: Optional[str] = None
         self.session_id: Optional[str] = None
+        # Dynamic HTTP endpoint for the per-room browser pod (set in entrypoint)
+        self.browser_http_url: Optional[str] = None
         self.caller_identity: Optional[str] = None
         self.curriculum_id: str = "ai_business_expert_424d7f"
         self.current_lo_id: Optional[str] = None

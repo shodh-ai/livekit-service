@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from opentelemetry import trace as otel_trace
@@ -12,6 +13,7 @@ from livekit.plugins import deepgram
 from .agent import RoxAgent
 from .rpc_services import AgentInteractionService
 from .config import get_settings
+from .utils import dns_safe_session_id
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -439,6 +441,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     logger.info("Starting Rox Conductor entrypoint")
 
+    # 1. Connect to the Room
     try:
         logger.info("Attempting to connect to LiveKit room...")
         await asyncio.wait_for(ctx.connect(), timeout=30.0)
@@ -468,22 +471,62 @@ async def entrypoint(ctx: agents.JobContext):
             pass
         return
 
+    # 2. TEACHER FILTER (The Critical Logic)
+    # If the room metadata explicitly says "needs_agent": false or creator_role is "teacher",
+    # we disconnect and exit early so teachers do not get an AI tutor.
+    try:
+        room_meta = getattr(ctx.room, "metadata", None)
+        if asyncio.iscoroutine(room_meta):
+            room_meta = await room_meta
+        if room_meta:
+            meta = json.loads(room_meta)
+            if meta.get("needs_agent") is False or meta.get("creator_role") == "teacher":
+                logger.info(f"Teacher session detected ({ctx.room.name}). Agent not required. Disconnecting.")
+                try:
+                    await ctx.disconnect()
+                except Exception:
+                    pass
+                try:
+                    otel_context.detach(_root_token)
+                    _root_span.end()
+                except Exception:
+                    pass
+                return
+    except Exception as e:
+        logger.warning(f"Failed to parse room metadata for teacher filter: {e}")
+
     # Log agent/room identity after successful connect for diagnostics
     try:
         lp = getattr(ctx.room, "local_participant", None)
-        logger.info(f"Agent connected with identity: {getattr(lp, 'identity', None)} room={getattr(ctx.room, 'name', None)}")
+        logger.info(
+            f"Agent connected with identity: {getattr(lp, 'identity', None)} room={getattr(ctx.room, 'name', None)}"
+        )
         try:
-            ids = list(getattr(ctx.room, 'remote_participants', {}).keys())
+            ids = list(getattr(ctx.room, "remote_participants", {}).keys())
             logger.info(f"Remote participants at connect: {ids}")
         except Exception:
             pass
     except Exception:
         pass
 
+    # 3. Dynamic Service Discovery for the Browser Pod
+    # Compute the per-room HTTP endpoint so the agent can talk to the browser pod via HTTP.
+    namespace = os.environ.get("K8S_NAMESPACE", "default")
+    try:
+        k8s_service_name = dns_safe_session_id(getattr(ctx.room, "name", "") or "")
+        dynamic_browser_url = f"http://{k8s_service_name}.{namespace}.svc.cluster.local:8778"
+        logger.info(f"Dynamic Browser URL calculated: {dynamic_browser_url}")
+    except Exception:
+        dynamic_browser_url = None
+        logger.warning("Failed to compute dynamic browser URL; browser integration may be disabled.", exc_info=True)
+
+    # 4. Initialize the Agent and attach the dynamic browser URL
     agent = RoxAgent()
     ctx.rox_agent = agent
     agent._room = ctx.room
     agent.session_id = ctx.room.name
+    if dynamic_browser_url:
+        agent.browser_http_url = dynamic_browser_url
 
     try:
         await _populate_agent_state_from_metadata(agent, ctx)
@@ -512,9 +555,9 @@ async def entrypoint(ctx: agents.JobContext):
     }
     agent_session = agents.AgentSession(**session_kwargs)
     agent.agent_session = agent_session
-    # Ensure AgentSession is running before issuing TTS/say calls
+
+    # Start the AgentSession (Deepgram STT/TTS + RoxAgent LLM interceptor)
     try:
-        # Pass both the agent and the LiveKit room explicitly
         await agent_session.start(agent=agent, room=ctx.room)
     except Exception as e:
         logger.error(f"FATAL: Failed to start AgentSession: {e}", exc_info=True)
@@ -529,10 +572,7 @@ async def entrypoint(ctx: agents.JobContext):
             pass
         return
 
-    
-
-    # Note: the main processing loop is driven externally by RPC/data events enqueuing tasks.
-    # Start the processing loop as a background task for parity with previous behavior.
+    # Start the agent's processing loop as a background task
     try:
         asyncio.create_task(agent.processing_loop())
     except Exception:
