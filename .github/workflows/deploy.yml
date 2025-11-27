@@ -49,15 +49,6 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
-      - name: Sync LiveKit secrets from Secret Manager to Kubernetes
-        run: |
-          NAMESPACE="default"
-          kubectl create secret generic livekit-credentials -n "$NAMESPACE" \
-            --from-literal=LIVEKIT_URL="$(gcloud secrets versions access latest --secret=LIVEKIT_URL)" \
-            --from-literal=LIVEKIT_API_KEY="$(gcloud secrets versions access latest --secret=LIVEKIT_API_KEY)" \
-            --from-literal=LIVEKIT_API_SECRET="$(gcloud secrets versions access latest --secret=LIVEKIT_API_SECRET)" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
       - name: Set Environment (prod vs staging)
         run: |
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
@@ -86,6 +77,15 @@ jobs:
         with:
           cluster_name: ${{ env.CLUSTER_NAME }}
           location: ${{ env.REGION }}
+
+      - name: Sync LiveKit secrets from Secret Manager to Kubernetes
+        run: |
+          NAMESPACE="default"
+          kubectl create secret generic livekit-credentials -n "$NAMESPACE" \
+            --from-literal=LIVEKIT_URL="$(gcloud secrets versions access latest --secret=LIVEKIT_URL)" \
+            --from-literal=LIVEKIT_API_KEY="$(gcloud secrets versions access latest --secret=LIVEKIT_API_KEY)" \
+            --from-literal=LIVEKIT_API_SECRET="$(gcloud secrets versions access latest --secret=LIVEKIT_API_SECRET)" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Update rox-agent-pool Deployment image
         run: |
