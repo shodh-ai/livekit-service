@@ -35,15 +35,19 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: test
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Google Auth
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
       - name: Set Environment (prod vs staging)
         run: |
