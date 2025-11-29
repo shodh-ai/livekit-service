@@ -145,11 +145,15 @@ class LangGraphClient:
         """
         logger.info(f"Invoking LangGraph with task: {task.get('task_name')}")
         
+        safe_session_id = str(session_id or "")
+        safe_student_id = str(user_id or "")
+        safe_curriculum_id = str(curriculum_id or "")
+
         # Base request body for all endpoints
         request_body = {
-            "session_id": session_id,
-            "student_id": user_id,
-            "curriculum_id": curriculum_id,
+            "session_id": safe_session_id,
+            "student_id": safe_student_id,
+            "curriculum_id": safe_curriculum_id,
             "current_lo_id": task.get("current_lo_id", None)
         }
 
