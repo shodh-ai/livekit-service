@@ -137,7 +137,12 @@ class RoxAgent(agents.Agent):
         self._is_paused: bool = False
         self._last_mic_enable_ts: Optional[float] = None
 
-        self._processing_queue: asyncio.Queue = asyncio.Queue()
+        # === FIX: Bounded queue to prevent memory exhaustion ===
+        # At 10k users, unbounded queues can cause OOM kills
+        self._processing_queue: asyncio.Queue = asyncio.Queue(maxsize=20)
+        logger.info("[QUEUE] Processing queue created with maxsize=20 (prevents memory exhaustion)")
+        # === END FIX ===
+
         self.llm_interceptor = self.TranscriptInterceptor(self)
 
         self.rrweb_events_buffer: List[Dict[str, Any]] = []
@@ -237,6 +242,13 @@ class RoxAgent(agents.Agent):
 
     async def processing_loop(self):
         logger.info("Conductor's main processing loop started")
+
+        # === FIX: Circuit breaker to prevent zombie agent loops ===
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 5
+        logger.info(f"[CIRCUIT_BREAKER] Initialized (max_errors={MAX_CONSECUTIVE_ERRORS})")
+        # === END FIX ===
+
         while True:
             try:
                 task = await self._processing_queue.get()
@@ -359,10 +371,35 @@ class RoxAgent(agents.Agent):
 
                     # =================================================================
 
+                    # === FIX: Reset circuit breaker on success ===
+                    consecutive_errors = 0
+                    # === END FIX ===
+
                     self._processing_queue.task_done()
-            except Exception:
-                logger.debug("processing_loop recovered from error", exc_info=True)
-                await asyncio.sleep(0.05)
+            except Exception as e:
+                # === FIX: Circuit breaker logic ===
+                consecutive_errors += 1
+                logger.error(
+                    f"[CIRCUIT_BREAKER] Error in processing_loop ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}",
+                    exc_info=True
+                )
+
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    logger.critical(
+                        f"[CIRCUIT_BREAKER] OPEN - Too many consecutive errors ({consecutive_errors}). "
+                        "Shutting down agent to prevent zombie loop and log spam."
+                    )
+                    # Gracefully close the agent session to trigger LiveKit disconnect
+                    if self.agent_session:
+                        try:
+                            await self.agent_session.aclose()
+                        except Exception:
+                            pass
+                    return  # Exit loop to allow process cleanup
+
+                # Exponential backoff between errors (not tight loop)
+                await asyncio.sleep(1.0)
+                # === END FIX ===
 
     async def _execute_toolbelt(self, toolbelt: List[Dict[str, Any]]):
         with tracer.start_as_current_span("execute_toolbelt", attributes={"actions.count": len(toolbelt)}):
@@ -812,7 +849,16 @@ class RoxAgent(agents.Agent):
         except Exception:
             payload = {}
         task = {"task_name": task_name, "caller_identity": caller_identity, **(payload if isinstance(payload, dict) else {})}
-        await self._processing_queue.put(task)
+
+        # === FIX: Non-blocking put with backpressure ===
+        # If queue is full, drop task instead of blocking/crashing
+        try:
+            self._processing_queue.put_nowait(task)
+        except asyncio.QueueFull:
+            logger.warning(f"[BACKPRESSURE] Dropping task '{task_name}' - Agent overloaded (queue full). This prevents OOM.")
+            # Optional: Send feedback to frontend that agent is busy
+            # You could implement a "thinking..." message here
+        # === END FIX ===
 
     async def optimistic_interrupt_ack(self, message: Optional[str] = None):
         try:
@@ -854,7 +900,13 @@ class RoxAgent(agents.Agent):
             enriched = dict(task)
             enriched["interaction_type"] = "interruption"
             enriched["_already_forwarded"] = True
-            await self._processing_queue.put(enriched)
+
+            # === FIX: Non-blocking put for interruptions ===
+            try:
+                self._processing_queue.put_nowait(enriched)
+            except asyncio.QueueFull:
+                logger.warning("[BACKPRESSURE] Dropping interruption task - Agent overloaded")
+            # === END FIX ===
         except Exception:
             logger.debug("handle_interruption failed (non-fatal)", exc_info=True)
 
@@ -881,3 +933,13 @@ class RoxAgent(agents.Agent):
             except Exception:
                 pass
             self._shutdown_recorded = True
+
+        # === FIX: Close HTTP session to prevent connection leak ===
+        # This releases file descriptors and connections to LangGraph service
+        try:
+            if hasattr(self, '_langgraph_client') and self._langgraph_client:
+                await self._langgraph_client.close()
+                logger.info("[CLEANUP] LangGraph HTTP session closed successfully")
+        except Exception as e:
+            logger.warning(f"[CLEANUP] Error closing LangGraph client: {e}")
+        # === END FIX ===

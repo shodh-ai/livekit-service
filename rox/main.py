@@ -14,6 +14,19 @@ logger = logging.getLogger("rox")
 
 
 if __name__ == "__main__":
+    # === FIX: Install uvloop for better async performance ===
+    # uvloop provides 2-4x faster event loop than default asyncio
+    # Critical for handling 10k+ concurrent users
+    try:
+        import uvloop
+        uvloop.install()
+        logger.info("[UVLOOP] ✅ uvloop installed (2-4x better async performance)")
+    except ImportError:
+        logger.warning("[UVLOOP] ⚠️  uvloop not available, using default asyncio event loop (slower)")
+    except Exception as e:
+        logger.warning(f"[UVLOOP] ⚠️  Failed to install uvloop: {e}")
+    # === END FIX ===
+
     # Initialize OpenTelemetry (optional; keep if used)
     try:
         init_tracing()

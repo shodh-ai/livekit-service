@@ -14,6 +14,7 @@ livekit-agents[deepgram,silero]~=1.0
 
 # Essential utilities
 aiohttp
+uvloop  # High-performance event loop (2-4x faster than asyncio)
 grpcio
 grpcio-tools
 click

@@ -57,6 +57,22 @@ class LangGraphClient:
         # Controls to minimize payload size
         self.include_visual_context = bool(settings.LANGGRAPH_INCLUDE_VISUAL_CONTEXT)
         self.attach_buffers = bool(settings.LANGGRAPH_ATTACH_BUFFERS)
+
+        # === FIX: Create persistent session to prevent connection leaks ===
+        # At 10k users, creating a session per request exhausts OS file descriptors
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._session = aiohttp.ClientSession(
+            timeout=self.timeout,
+            connector=aiohttp.TCPConnector(
+                limit=100,  # Max 100 concurrent connections
+                keepalive_timeout=60,  # Keep connections alive for 60s
+                force_close=False,  # Reuse connections
+                enable_cleanup_closed=True,
+            )
+        )
+        logger.info("[HTTP_POOL] Persistent aiohttp session created (limit=100, keepalive=60s)")
+        # === END FIX ===
+
         # Initialization logs for diagnostics
         logger.info(
             f"LangGraphClient base_url={self.base_url} (timeout total={self.timeout.total}s, connect={self.timeout.connect}s, sock_connect={self.timeout.sock_connect}s, sock_read={self.timeout.sock_read}s, retries={self.max_retries})"
@@ -67,6 +83,12 @@ class LangGraphClient:
             logger.info(f"LangGraphClient VNC_LISTENER_HTTP_URL set: {self.vnc_http_url}")
         else:
             logger.info("LangGraphClient: No browser HTTP source configured; visual_context may be omitted.")
+
+    async def close(self):
+        """Close the persistent HTTP session. Call this when shutting down the agent."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            logger.info("[HTTP_POOL] Persistent session closed")
 
     async def _fetch_visual_context(self, session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
         """Optionally fetch a screenshot from the browser pod HTTP endpoint using the
@@ -176,209 +198,212 @@ class LangGraphClient:
             pass
 
         try:
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                # Route to appropriate endpoint based on task type
-                if task.get("task_name") == "start_tutoring_session":
-                    endpoint = "/start_session"
-                    # For session start, use base request body (no student_input needed)
-                elif task.get("interaction_type") == "interruption" or task.get("task_name") in ["handle_interruption", "student_mic_button_interrupt", "student_wants_to_interrupt"]:
-                    endpoint = "/handle_interruption"
-                    # Interruption payload
-                    interrupt_text = task.get("transcript") or request_body.get("student_input") or "[Student interrupted]"
-                    request_body["student_input"] = interrupt_text
-                    # Pass through interrupted_plan_context if provided
-                    if task.get("interrupted_plan_context"):
-                        request_body["interrupted_plan_context"] = task.get("interrupted_plan_context")
-                    # Compose visual_context from task and optional VNC screenshot
-                    vc = task.get("visual_context") or {}
-                    vnc_vc = await self._fetch_visual_context(session)
-                    if vnc_vc:
-                        # Merge, task-provided fields take precedence
-                        merged = {**vnc_vc, **vc}
-                        request_body["visual_context"] = merged
-                    elif vc:
-                        request_body["visual_context"] = vc
-                else:
-                    endpoint = "/handle_response"
-                    # Add student_input for regular response
-                    request_body["student_input"] = task.get("transcript", "")
-                    # Compose visual_context from task and optional VNC screenshot
-                    vc = task.get("visual_context") or {}
-                    vnc_vc = await self._fetch_visual_context(session)
-                    if vnc_vc:
-                        merged = {**vnc_vc, **vc}
-                        request_body["visual_context"] = merged
-                    elif vc:
-                        request_body["visual_context"] = vc
-                
-                # --- ROBUSTNESS CHANGE: Construct URL safely ---
-                full_url = f"{self.base_url}{endpoint}"
+            # === FIX: Use persistent session instead of creating new one ===
+            session = self._session
+            # === END FIX ===
 
-                # Ensure session_id is propagated to the Student Tutor service
-                # so that conversational context is maintained across turns.
-                if session_id:
-                    request_body["session_id"] = session_id
+            # Route to appropriate endpoint based on task type
+            if task.get("task_name") == "start_tutoring_session":
+                endpoint = "/start_session"
+                # For session start, use base request body (no student_input needed)
+            elif task.get("interaction_type") == "interruption" or task.get("task_name") in ["handle_interruption", "student_mic_button_interrupt", "student_wants_to_interrupt"]:
+                endpoint = "/handle_interruption"
+                # Interruption payload
+                interrupt_text = task.get("transcript") or request_body.get("student_input") or "[Student interrupted]"
+                request_body["student_input"] = interrupt_text
+                # Pass through interrupted_plan_context if provided
+                if task.get("interrupted_plan_context"):
+                    request_body["interrupted_plan_context"] = task.get("interrupted_plan_context")
+                # Compose visual_context from task and optional VNC screenshot
+                vc = task.get("visual_context") or {}
+                vnc_vc = await self._fetch_visual_context(session)
+                if vnc_vc:
+                    # Merge, task-provided fields take precedence
+                    merged = {**vnc_vc, **vc}
+                    request_body["visual_context"] = merged
+                elif vc:
+                    request_body["visual_context"] = vc
+            else:
+                endpoint = "/handle_response"
+                # Add student_input for regular response
+                request_body["student_input"] = task.get("transcript", "")
+                # Compose visual_context from task and optional VNC screenshot
+                vc = task.get("visual_context") or {}
+                vnc_vc = await self._fetch_visual_context(session)
+                if vnc_vc:
+                    merged = {**vnc_vc, **vc}
+                    request_body["visual_context"] = merged
+                elif vc:
+                    request_body["visual_context"] = vc
 
-                # Log outgoing request for correlation (mask large base64 fields)
+            # --- ROBUSTNESS CHANGE: Construct URL safely ---
+            full_url = f"{self.base_url}{endpoint}"
+
+            # Ensure session_id is propagated to the Student Tutor service
+            # so that conversational context is maintained across turns.
+            if session_id:
+                request_body["session_id"] = session_id
+
+            # Log outgoing request for correlation (mask large base64 fields)
+            try:
+                safe_body = dict(request_body)
+                vc = safe_body.get("visual_context")
+                if isinstance(vc, dict):
+                    vc_masked = dict(vc)
+                    b64 = vc_masked.get("screenshot_b64") or ""
+                    if b64:
+                        vc_masked["screenshot_b64"] = f"[len={len(b64)} preview={b64[:60]}...]"
+                    vc_masked["has_screenshot_b64"] = bool(b64)
+                    safe_body["visual_context"] = vc_masked
+                logger.info(f"LangGraphClient POST {full_url} body: {json.dumps(safe_body, ensure_ascii=False)}")
+            except Exception:
+                # Fallback to repr if JSON serialization fails
+                logger.info(f"LangGraphClient POST {full_url} body(repr): {request_body!r}")
+
+            # Attach buffered rrweb events if available (imprinter mode)
+            if self.attach_buffers:
                 try:
-                    safe_body = dict(request_body)
-                    vc = safe_body.get("visual_context")
-                    if isinstance(vc, dict):
-                        vc_masked = dict(vc)
-                        b64 = vc_masked.get("screenshot_b64") or ""
-                        if b64:
-                            vc_masked["screenshot_b64"] = f"[len={len(b64)} preview={b64[:60]}...]"
-                        vc_masked["has_screenshot_b64"] = bool(b64)
-                        safe_body["visual_context"] = vc_masked
-                    logger.info(f"LangGraphClient POST {full_url} body: {json.dumps(safe_body, ensure_ascii=False)}")
+                    if getattr(self, "agent", None) is not None:
+                        events = getattr(self.agent, "rrweb_events_buffer", None)
+                        if isinstance(events, list) and len(events) > 0:
+                            logger.info(f"Attaching {len(events)} rrweb events to LangGraph request.")
+                            request_body["rrweb_events"] = list(events)
+                            # Clear buffer after attaching
+                            events.clear()
                 except Exception:
-                    # Fallback to repr if JSON serialization fails
-                    logger.info(f"LangGraphClient POST {full_url} body(repr): {request_body!r}")
+                    logger.debug("Failed to attach rrweb_events to request body", exc_info=True)
 
-                # Attach buffered rrweb events if available (imprinter mode)
-                if self.attach_buffers:
-                    try:
-                        if getattr(self, "agent", None) is not None:
-                            events = getattr(self.agent, "rrweb_events_buffer", None)
-                            if isinstance(events, list) and len(events) > 0:
-                                logger.info(f"Attaching {len(events)} rrweb events to LangGraph request.")
-                                request_body["rrweb_events"] = list(events)
-                                # Clear buffer after attaching
-                                events.clear()
-                    except Exception:
-                        logger.debug("Failed to attach rrweb_events to request body", exc_info=True)
+            # Attach live monitoring events for Kamikaze if present
+            if self.attach_buffers:
+                try:
+                    if getattr(self, "agent", None) is not None:
+                        live_events = getattr(self.agent, "live_events_buffer", None)
+                        if isinstance(live_events, list) and len(live_events) > 0:
+                            rr = [e.get("event_payload") for e in live_events if e.get("source") == "rrweb" and e.get("event_payload") is not None]
+                            vc = [e.get("event_payload") for e in live_events if e.get("source") == "vscode" and e.get("event_payload") is not None]
+                            if rr:
+                                request_body["raw_rrweb_events"] = rr
+                            if vc:
+                                request_body["raw_vscode_events"] = vc
+                            logger.info(f"Attached live events: rrweb={len(rr)} vscode={len(vc)}")
+                            live_events.clear()
+                except Exception:
+                    logger.debug("Failed to attach live events to request body", exc_info=True)
 
-                # Attach live monitoring events for Kamikaze if present
-                if self.attach_buffers:
-                    try:
-                        if getattr(self, "agent", None) is not None:
-                            live_events = getattr(self.agent, "live_events_buffer", None)
-                            if isinstance(live_events, list) and len(live_events) > 0:
-                                rr = [e.get("event_payload") for e in live_events if e.get("source") == "rrweb" and e.get("event_payload") is not None]
-                                vc = [e.get("event_payload") for e in live_events if e.get("source") == "vscode" and e.get("event_payload") is not None]
-                                if rr:
-                                    request_body["raw_rrweb_events"] = rr
-                                if vc:
-                                    request_body["raw_vscode_events"] = vc
-                                logger.info(f"Attached live events: rrweb={len(rr)} vscode={len(vc)}")
-                                live_events.clear()
-                    except Exception:
-                        logger.debug("Failed to attach live events to request body", exc_info=True)
-
-                # Prepare trace headers if present
+            # Prepare trace headers if present
+            headers = None
+            try:
+                trace_id = task.get("trace_id") if isinstance(task, dict) else None
+                if trace_id:
+                    headers = {"X-Trace-Id": str(trace_id)}
+                    logger.info(f"[TRACE] Propagating trace_id={trace_id} to {full_url}")
+            except Exception:
                 headers = None
+
+            # POST with retry logic on timeouts and transient errors
+            last_error: Optional[Exception] = None
+            for attempt in range(1, self.max_retries + 1):
                 try:
-                    trace_id = task.get("trace_id") if isinstance(task, dict) else None
-                    if trace_id:
-                        headers = {"X-Trace-Id": str(trace_id)}
-                        logger.info(f"[TRACE] Propagating trace_id={trace_id} to {full_url}")
-                except Exception:
-                    headers = None
-
-                # POST with retry logic on timeouts and transient errors
-                last_error: Optional[Exception] = None
-                for attempt in range(1, self.max_retries + 1):
-                    try:
-                        logger.info(
-                            f"POST attempt {attempt}/{self.max_retries} -> {full_url}"
-                        )
-                        async with session.post(full_url, json=request_body, headers=headers) as response:
-                            status = response.status
-                            if 400 <= status < 500:
-                                # Do not retry on client errors; capture body for diagnosis
-                                try:
-                                    err_text = await response.text()
-                                except Exception:
-                                    err_text = "<no body>"
-                                logger.error(f"LangGraphClient 4xx response {status} from {full_url}: {err_text}")
-                                return None
-                            # For 5xx and others, raise for retry handling
-                            response.raise_for_status()
-                            logger.info(
-                                f"LangGraphClient response status: {status}"
-                            )
-
-                            # Try to parse JSON, otherwise capture text
-                            try:
-                                response_data = await response.json()
-                                logger.info(
-                                    f"LangGraphClient response JSON: {json.dumps(response_data, ensure_ascii=False)}"
-                                )
-                            except Exception:
-                                response_text = await response.text()
-                                logger.info(
-                                    f"LangGraphClient response text (non-JSON): {response_text}"
-                                )
-                                # If not JSON, we can't proceed as expected
-                                return None
-
-                            # The actual LangGraph service returns {"delivery_plan": delivery_plan}
-                            # We need to wrap it in the format the main agent loop expects
-                            if response_data and "delivery_plan" in response_data:
-                                logger.info(
-                                    f"Received response from LangGraph service: delivery_plan with {len(response_data['delivery_plan'].get('actions', []))} actions"
-                                )
-
-                                # Return in the format expected by main.py
-                                return {
-                                    "delivery_plan": response_data["delivery_plan"],
-                                    "current_lo_id": task.get("current_lo_id"),  # Preserve current_lo_id
-                                }
-                            else:
-                                logger.warning(
-                                    "No delivery_plan received from LangGraph service"
-                                )
-                                return None
-                    except asyncio.TimeoutError as e:
-                        last_error = e
-                        if attempt < self.max_retries:
-                            delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
-                            logger.warning(
-                                f"Timeout on attempt {attempt}/{self.max_retries}. Retrying in {delay:.2f}s..."
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        else:
-                            logger.error(
-                                f"All retries exhausted due to timeout: {e}",
-                            )
-                            break
-                    except aiohttp.ClientResponseError as e:
-                        # Raised by raise_for_status(); treat 5xx as retryable, 4xx handled above
-                        last_error = e
-                        if 500 <= e.status < 600 and attempt < self.max_retries:
-                            delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
-                            logger.warning(
-                                f"Server error {e.status} on attempt {attempt}/{self.max_retries}. Retrying in {delay:.2f}s..."
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        else:
-                            logger.error(
-                                f"Non-retryable HTTP error or retries exhausted: {e}"
-                            )
-                            break
-                    except aiohttp.ClientError as e:
-                        last_error = e
-                        # For transient network errors, also retry
-                        if attempt < self.max_retries:
-                            delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
-                            logger.warning(
-                                f"HTTP client error on attempt {attempt}/{self.max_retries}: {e}. Retrying in {delay:.2f}s..."
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        else:
-                            logger.error(
-                                f"All retries exhausted due to HTTP error: {e}",
-                            )
-                            break
-
-                if last_error:
-                    logger.error(
-                        f"Failed to communicate with LangGraph after {self.max_retries} attempts: {last_error}"
+                    logger.info(
+                        f"POST attempt {attempt}/{self.max_retries} -> {full_url}"
                     )
-                return None
+                    async with session.post(full_url, json=request_body, headers=headers) as response:
+                        status = response.status
+                        if 400 <= status < 500:
+                            # Do not retry on client errors; capture body for diagnosis
+                            try:
+                                err_text = await response.text()
+                            except Exception:
+                                err_text = "<no body>"
+                            logger.error(f"LangGraphClient 4xx response {status} from {full_url}: {err_text}")
+                            return None
+                        # For 5xx and others, raise for retry handling
+                        response.raise_for_status()
+                        logger.info(
+                            f"LangGraphClient response status: {status}"
+                        )
+
+                        # Try to parse JSON, otherwise capture text
+                        try:
+                            response_data = await response.json()
+                            logger.info(
+                                f"LangGraphClient response JSON: {json.dumps(response_data, ensure_ascii=False)}"
+                            )
+                        except Exception:
+                            response_text = await response.text()
+                            logger.info(
+                                f"LangGraphClient response text (non-JSON): {response_text}"
+                            )
+                            # If not JSON, we can't proceed as expected
+                            return None
+
+                        # The actual LangGraph service returns {"delivery_plan": delivery_plan}
+                        # We need to wrap it in the format the main agent loop expects
+                        if response_data and "delivery_plan" in response_data:
+                            logger.info(
+                                f"Received response from LangGraph service: delivery_plan with {len(response_data['delivery_plan'].get('actions', []))} actions"
+                            )
+
+                            # Return in the format expected by main.py
+                            return {
+                                "delivery_plan": response_data["delivery_plan"],
+                                "current_lo_id": task.get("current_lo_id"),  # Preserve current_lo_id
+                            }
+                        else:
+                            logger.warning(
+                                "No delivery_plan received from LangGraph service"
+                            )
+                            return None
+                except asyncio.TimeoutError as e:
+                    last_error = e
+                    if attempt < self.max_retries:
+                        delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
+                        logger.warning(
+                            f"Timeout on attempt {attempt}/{self.max_retries}. Retrying in {delay:.2f}s..."
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(
+                            f"All retries exhausted due to timeout: {e}",
+                        )
+                        break
+                except aiohttp.ClientResponseError as e:
+                    # Raised by raise_for_status(); treat 5xx as retryable, 4xx handled above
+                    last_error = e
+                    if 500 <= e.status < 600 and attempt < self.max_retries:
+                        delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
+                        logger.warning(
+                            f"Server error {e.status} on attempt {attempt}/{self.max_retries}. Retrying in {delay:.2f}s..."
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(
+                            f"Non-retryable HTTP error or retries exhausted: {e}"
+                        )
+                        break
+                except aiohttp.ClientError as e:
+                    last_error = e
+                    # For transient network errors, also retry
+                    if attempt < self.max_retries:
+                        delay = self.backoff_base * (2 ** (attempt - 1)) + random.random() * 0.5
+                        logger.warning(
+                            f"HTTP client error on attempt {attempt}/{self.max_retries}: {e}. Retrying in {delay:.2f}s..."
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(
+                            f"All retries exhausted due to HTTP error: {e}",
+                        )
+                        break
+
+            if last_error:
+                logger.error(
+                    f"Failed to communicate with LangGraph after {self.max_retries} attempts: {last_error}"
+                )
+            return None
                         
         except aiohttp.ClientError as e:
             logger.error(f"HTTP error communicating with LangGraph: {e}")
