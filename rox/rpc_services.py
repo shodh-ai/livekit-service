@@ -321,10 +321,34 @@ class AgentInteractionService:
                     self.agent._start_task_enqueued_at = time.time()
                 except Exception:
                     pass
+
+                # Extract optional student persona from the raw payload JSON, if present.
+                student_persona = None
+                try:
+                    if getattr(raw_payload, "payload", None):
+                        decoded = base64.b64decode(raw_payload.payload)
+                        try:
+                            payload_obj = json.loads(decoded.decode("utf-8", errors="ignore"))
+                        except Exception:
+                            payload_obj = {}
+                        if isinstance(payload_obj, dict):
+                            candidate = payload_obj.get("student_persona")
+                            if isinstance(candidate, str) and candidate.strip():
+                                student_persona = candidate.strip()
+                except Exception:
+                    student_persona = None
+
                 start_task = {
                     "task_name": "start_tutoring_session",
                     "caller_identity": pid,
                 }
+                if student_persona is not None:
+                    start_task["student_persona"] = student_persona
+                    try:
+                        logger.info(f"[TestPing] Forwarding student_persona from frontend: {student_persona}")
+                    except Exception:
+                        pass
+
                 await self.agent._processing_queue.put(start_task)
             else:
                 # Already started or enqueued: treat as reconnect nudge
