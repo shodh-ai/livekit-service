@@ -58,20 +58,36 @@ class LangGraphClient:
         self.include_visual_context = bool(settings.LANGGRAPH_INCLUDE_VISUAL_CONTEXT)
         self.attach_buffers = bool(settings.LANGGRAPH_ATTACH_BUFFERS)
 
-        # === FIX: Create persistent session to prevent connection leaks ===
-        # At 10k users, creating a session per request exhausts OS file descriptors
+        # === FIX: Lazy-create persistent session to prevent connection leaks ===
+        # We only create the aiohttp.ClientSession once we are inside an async
+        # context with a running event loop (see _get_session). This avoids
+        # importing/constructing event-loop bound objects during RoxAgent.__init__
+        # which is called from synchronous test code and can trigger
+        # "RuntimeError: no running event loop" under pytest asyncio strict mode.
         self._session: Optional[aiohttp.ClientSession] = None
-        self._session = aiohttp.ClientSession(
-            timeout=self.timeout,
-            connector=aiohttp.TCPConnector(
-                limit=100,  # Max 100 concurrent connections
-                keepalive_timeout=60,  # Keep connections alive for 60s
-                force_close=False,  # Reuse connections
-                enable_cleanup_closed=True,
-            )
-        )
-        logger.info("[HTTP_POOL] Persistent aiohttp session created (limit=100, keepalive=60s)")
         # === END FIX ===
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Lazily create and return the shared aiohttp session.
+
+        This method MUST be called from within a running event loop (i.e., from
+        async code). It preserves the previous behavior of using a single
+        long-lived session with a tuned TCPConnector, but defers its creation
+        until first use so that RoxAgent() can be constructed safely in
+        synchronous contexts (e.g., unit tests).
+        """
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=self.timeout,
+                connector=aiohttp.TCPConnector(
+                    limit=100,            # Max 100 concurrent connections
+                    keepalive_timeout=60, # Keep connections alive for 60s
+                    force_close=False,    # Reuse connections
+                    enable_cleanup_closed=True,
+                ),
+            )
+            logger.info("[HTTP_POOL] Persistent aiohttp session created (limit=100, keepalive=60s)")
+        return self._session
 
         # Initialization logs for diagnostics
         logger.info(
@@ -197,9 +213,16 @@ class LangGraphClient:
         except Exception:
             pass
 
+        # Optional: pass through student_persona so Kamikaze can tune lesson planning
         try:
-            # === FIX: Use persistent session instead of creating new one ===
-            session = self._session
+            if task.get("student_persona") is not None:
+                request_body["student_persona"] = task.get("student_persona")
+        except Exception:
+            pass
+
+        try:
+            # === FIX: Use lazily-created persistent session instead of creating new one per request ===
+            session = await self._get_session()
             # === END FIX ===
 
             # Route to appropriate endpoint based on task type
