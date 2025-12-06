@@ -281,23 +281,33 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
             await asyncio.sleep(student_disconnect_grace)
             if identity and identity == agent.caller_identity:
                 logger.warning(
-                    f"Student '{identity}' did not reconnect within {student_disconnect_grace:.1f}s. Shutting down agent."
+                    f"ROOM [GRACE_TIMEOUT] Student '{identity}' did not reconnect within {student_disconnect_grace:.1f}s. Shutting down agent."
                 )
                 ctx.shutdown()
         except asyncio.CancelledError:
-            logger.info("Student reconnect detected before grace timeout; not shutting down.")
+            logger.info(f"ROOM [RECONNECT] Grace period avoided - student '{identity}' reconnected successfully within {student_disconnect_grace:.1f}s")
         except Exception:
-            logger.debug("error in delayed student shutdown task", exc_info=True)
+            logger.debug("ROOM [GRACE_TIMEOUT] error in delayed student shutdown task", exc_info=True)
 
     def _on_participant_disconnected(participant: rtc.RemoteParticipant):
         nonlocal student_disconnect_task
         try:
+            ident = participant.identity
+            logger.info(f"ROOM [DISCONNECT] participant_disconnected: {ident}")
+
+            # --- FIX: Clear handshake memory to allow fresh handshake on reconnect ---
+            if ident in handshake_targets_sent:
+                handshake_targets_sent.remove(ident)
+                logger.info(f"ROOM [DISCONNECT] Cleared handshake memory for {ident} (allows fresh handshake on reconnect)")
+            # --- END FIX ---
+
             if participant.identity == agent.caller_identity:
+                logger.info(f"ROOM [DISCONNECT] Primary caller {ident} disconnected. Starting {student_disconnect_grace:.1f}s grace timer.")
                 if student_disconnect_task and not student_disconnect_task.done():
                     student_disconnect_task.cancel()
                 student_disconnect_task = asyncio.create_task(_delayed_student_shutdown(participant.identity))
         except Exception:
-            logger.debug("participant_disconnected handler error", exc_info=True)
+            logger.debug("ROOM [DISCONNECT] participant_disconnected handler error", exc_info=True)
 
     ctx.room.on("participant_disconnected", _on_participant_disconnected)
 
@@ -306,36 +316,49 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
 
     async def shutdown_if_no_student():
         try:
+            logger.info(f"ROOM [NO_SHOW_TIMER] Starting no-show timer: {shutdown_timeout_seconds}s")
             await asyncio.sleep(shutdown_timeout_seconds)
         except asyncio.CancelledError:
+            logger.info("ROOM [NO_SHOW_TIMER] No-show timer cancelled (student joined)")
             return
         if not agent.caller_identity:
-            logger.warning("No student joined within the timeout period. Shutting down agent.")
+            logger.warning(f"ROOM [NO_SHOW_TIMEOUT] No student joined within {shutdown_timeout_seconds}s. Shutting down agent.")
             ctx.shutdown()
 
     shutdown_task = asyncio.create_task(shutdown_if_no_student())
 
     def _on_participant_connected(participant: rtc.RemoteParticipant):
+        nonlocal student_disconnect_task
+
         # Cancel the no-show shutdown
         try:
             if not shutdown_task.done():
                 shutdown_task.cancel()
+                logger.info("ROOM [CONNECT] No-show shutdown cancelled (participant joined)")
         except Exception:
-            logger.debug("no-show cancel handler error", exc_info=True)
+            logger.debug("ROOM [CONNECT] no-show cancel handler error", exc_info=True)
 
         # Set caller identity to first non-browser participant and send handshake
         try:
             ident = str(getattr(participant, "identity", "") or "")
-            logger.info(f"participant_connected: {ident}")
+            logger.info(f"ROOM [CONNECT] participant_connected: {ident}")
             if ident and not ident.startswith("browser-bot-"):
+                # === FIX: Cancel grace period timer if this participant is reconnecting ===
+                if ident == agent.caller_identity and student_disconnect_task and not student_disconnect_task.done():
+                    student_disconnect_task.cancel()
+                    logger.info(f"ROOM [RECONNECT] Grace period timer cancelled - {ident} reconnected successfully")
+                # === END FIX ===
+
                 agent.caller_identity = ident
+                logger.info(f"ROOM [CONNECT] Set caller_identity to: {ident}")
 
                 async def _send_handshake_and_maybe_start():
                     # Best-effort handshake to frontend to kick off its flows
                     try:
                         if ident in handshake_targets_sent:
-                            logger.info(f"agent_ready already sent to {ident}; skipping duplicate")
+                            logger.warning(f"ROOM [HANDSHAKE] agent_ready ALREADY sent to {ident}; skipping duplicate (THIS SHOULD NOT HAPPEN AFTER FIX)")
                         else:
+                            logger.info(f"ROOM [HANDSHAKE] Sending agent_ready to {ident}")
                             payload = json.dumps({
                                 "type": "agent_ready",
                                 "agent_identity": ctx.room.local_participant.identity,
@@ -347,9 +370,9 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                                 destination_identities=[ident],
                             )
                             handshake_targets_sent.add(ident)
-                            logger.info(f"agent_ready sent to {ident}")
+                            logger.info(f"ROOM [HANDSHAKE] Successfully sent agent_ready to {ident}")
                     except Exception:
-                        logger.debug("participant_connected: handshake publish failed", exc_info=True)
+                        logger.error("ROOM [HANDSHAKE] Failed to publish handshake", exc_info=True)
 
                     # Fallback: if frontend doesn't RPC soon, auto-enqueue start
                     try:
@@ -365,13 +388,15 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                                 "task_name": "start_tutoring_session",
                                 "caller_identity": ident,
                             })
-                            logger.info("[participant_connected] Fallback enqueued start_tutoring_session")
+                            logger.info("ROOM [FALLBACK] Enqueued start_tutoring_session (frontend didn't RPC within 2s)")
                     except Exception:
-                        logger.debug("participant_connected: fallback start enqueue failed", exc_info=True)
+                        logger.debug("ROOM [FALLBACK] fallback start enqueue failed", exc_info=True)
 
                 asyncio.create_task(_send_handshake_and_maybe_start())
+            else:
+                logger.info(f"ROOM [CONNECT] Ignoring browser-bot participant: {ident}")
         except Exception:
-            logger.debug("participant_connected post-setup error", exc_info=True)
+            logger.debug("ROOM [CONNECT] participant_connected post-setup error", exc_info=True)
 
     ctx.room.on("participant_connected", _on_participant_connected)
 
@@ -379,6 +404,7 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
     async def _initial_handshake():
         try:
             await asyncio.sleep(1)
+            logger.info("ROOM [INITIAL_HANDSHAKE] Checking for existing participants")
             if len(ctx.room.remote_participants) > 0:
                 try:
                     participants = list(ctx.room.remote_participants.values())
@@ -386,25 +412,29 @@ async def _setup_room_lifecycle_events(agent: RoxAgent, ctx: agents.JobContext):
                     participants = []
                 ids = [str(getattr(p, "identity", "") or "") for p in participants if str(getattr(p, "identity", "") or "")]
                 non_browser = [i for i in ids if not i.startswith("browser-bot-")]
+                logger.info(f"ROOM [INITIAL_HANDSHAKE] Found {len(non_browser)} non-browser participants: {non_browser}")
                 if non_browser:
                     selected_identity = non_browser[0]
                     agent.caller_identity = selected_identity
-                    logger.info(f"Initial handshake: Found student '{selected_identity}', sending agent_ready.")
+                    logger.info(f"ROOM [INITIAL_HANDSHAKE] Selected student: {selected_identity}")
                     if selected_identity in handshake_targets_sent:
-                        logger.info(f"Initial handshake skipped; already sent to {selected_identity}")
+                        logger.warning(f"ROOM [INITIAL_HANDSHAKE] Handshake already sent to {selected_identity}; skipping")
                     else:
+                        logger.info(f"ROOM [INITIAL_HANDSHAKE] Sending agent_ready to {selected_identity}")
                         handshake_payload = json.dumps({"type": "agent_ready", "agent_identity": ctx.room.local_participant.identity})
                         await ctx.room.local_participant.publish_data(handshake_payload.encode("utf-8"), destination_identities=[selected_identity])
                         handshake_targets_sent.add(selected_identity)
+                        logger.info(f"ROOM [INITIAL_HANDSHAKE] Successfully sent agent_ready to {selected_identity}")
                 else:
-                    # No student present yet; wait for participant_connected handler to send handshake
-                    pass
+                    logger.info("ROOM [INITIAL_HANDSHAKE] No student present yet; will wait for participant_connected event")
+            else:
+                logger.info("ROOM [INITIAL_HANDSHAKE] No remote participants yet")
         except Exception:
-            logger.debug("initial handshake failed", exc_info=True)
+            logger.error("ROOM [INITIAL_HANDSHAKE] Initial handshake failed", exc_info=True)
 
     asyncio.create_task(_initial_handshake())
 
-    logger.info("Room lifecycle event handlers registered.")
+    logger.info("ROOM [LIFECYCLE] Room lifecycle event handlers registered.")
 
 
 async def _register_agent_rpc_handlers(agent: RoxAgent, ctx: agents.JobContext):
@@ -439,15 +469,15 @@ async def entrypoint(ctx: agents.JobContext):
     _root_span = tracer.start_span("livekit.agent.job")
     _root_token = otel_context.attach(otel_trace.set_span_in_context(_root_span))
 
-    logger.info("Starting Rox Conductor entrypoint")
+    logger.info("ROOM [ENTRYPOINT] Starting Rox Conductor entrypoint")
 
     # 1. Connect to the Room
     try:
-        logger.info("Attempting to connect to LiveKit room...")
+        logger.info("ROOM [ENTRYPOINT] Attempting to connect to LiveKit room...")
         await asyncio.wait_for(ctx.connect(), timeout=30.0)
-        logger.info("Successfully connected to LiveKit room.")
+        logger.info("ROOM [ENTRYPOINT] Successfully connected to LiveKit room.")
     except asyncio.TimeoutError:
-        logger.error("FATAL: Timed out while trying to connect to LiveKit room. Agent is shutting down.")
+        logger.error("ROOM [ENTRYPOINT] FATAL: Timed out while trying to connect to LiveKit room. Agent is shutting down.")
         try:
             ctx.shutdown()
         except Exception:
@@ -459,7 +489,7 @@ async def entrypoint(ctx: agents.JobContext):
             pass
         return
     except Exception as e:
-        logger.error(f"FATAL: Failed to connect to LiveKit room: {e}", exc_info=True)
+        logger.error(f"ROOM [ENTRYPOINT] FATAL: Failed to connect to LiveKit room: {e}", exc_info=True)
         try:
             ctx.shutdown()
         except Exception:
@@ -480,8 +510,9 @@ async def entrypoint(ctx: agents.JobContext):
             room_meta = await room_meta
         if room_meta:
             meta = json.loads(room_meta)
+            logger.info(f"ROOM [METADATA] Room metadata: {meta}")
             if meta.get("needs_agent") is False or meta.get("creator_role") == "teacher":
-                logger.info(f"Teacher session detected ({ctx.room.name}). Agent not required. Disconnecting.")
+                logger.info(f"ROOM [TEACHER_FILTER] Teacher session detected ({ctx.room.name}). Agent not required. Disconnecting.")
                 try:
                     await ctx.disconnect()
                 except Exception:
@@ -492,18 +523,22 @@ async def entrypoint(ctx: agents.JobContext):
                 except Exception:
                     pass
                 return
+            else:
+                logger.info(f"ROOM [TEACHER_FILTER] Student session detected. Proceeding with agent setup.")
+        else:
+            logger.info("ROOM [METADATA] No room metadata found")
     except Exception as e:
-        logger.warning(f"Failed to parse room metadata for teacher filter: {e}")
+        logger.warning(f"ROOM [METADATA] Failed to parse room metadata for teacher filter: {e}")
 
     # Log agent/room identity after successful connect for diagnostics
     try:
         lp = getattr(ctx.room, "local_participant", None)
         logger.info(
-            f"Agent connected with identity: {getattr(lp, 'identity', None)} room={getattr(ctx.room, 'name', None)}"
+            f"ROOM [IDENTITY] Agent connected with identity: {getattr(lp, 'identity', None)} room={getattr(ctx.room, 'name', None)}"
         )
         try:
             ids = list(getattr(ctx.room, "remote_participants", {}).keys())
-            logger.info(f"Remote participants at connect: {ids}")
+            logger.info(f"ROOM [PARTICIPANTS] Remote participants at connect: {ids}")
         except Exception:
             pass
     except Exception:
