@@ -13,13 +13,11 @@ try:
     from .config import get_settings
     from .langgraph_client import LangGraphClient
     from .frontend_client import FrontendClient
-    from .browser_pod_client import BrowserPodClient
     from .request_context import set_request_context
 except Exception:
     from rox.config import get_settings
     from rox.langgraph_client import LangGraphClient
     from rox.frontend_client import FrontendClient
-    from rox.browser_pod_client import BrowserPodClient
     from rox.request_context import set_request_context
 from opentelemetry import metrics, trace
 
@@ -149,7 +147,6 @@ class RoxAgent(agents.Agent):
         self.live_events_buffer: List[Dict[str, Any]] = []
         self._langgraph_client = LangGraphClient(self)
         self._frontend_client = FrontendClient()
-        self._browser_pod_client = BrowserPodClient()
         self._gemini_tts_client = None
 
         self._room: Optional[rtc.Room] = None
@@ -176,25 +173,6 @@ class RoxAgent(agents.Agent):
             "set_ui_state": self._execute_set_ui_state,
             "wait": self._execute_wait,
             "draw": self._execute_draw,
-            # browser pod commands
-            "browser_navigate": self._execute_browser_command,
-            "browser_click": self._execute_browser_command,
-            "browser_type": self._execute_browser_command,
-            "browser_type_text": self._execute_browser_command,
-            "web_click": self._execute_browser_command,
-            "web_fill_input": self._execute_browser_command,
-            "browser_highlight_element": self._execute_browser_command,
-            "jupyter_run_cell": self._execute_browser_command,
-            "jupyter_add_cell": self._execute_browser_command,
-            "jupyter_update_cell": self._execute_browser_command,
-            "jupyter_delete_cell": self._execute_browser_command,
-            "vscode_add_line": self._execute_browser_command,
-            "vscode_delete_line": self._execute_browser_command,
-            "vscode_run_terminal_command": self._execute_browser_command,
-            "vscode_highlight_add": self._execute_browser_command,
-            "vscode_highlight_remove": self._execute_browser_command,
-            "vscode_create_file": self._execute_browser_command,
-            "n8n_upsert_workflow_from_asset": self._execute_browser_command,
             # jupyter/frontend helpers
             "jupyter_create_new_cell": self._execute_frontend_action,
             "jupyter_scroll_to_cell": self._execute_frontend_action,
@@ -569,18 +547,6 @@ class RoxAgent(agents.Agent):
             await self._frontend_client.execute_visual_action(self._room, self.caller_identity, "draw", parameters)
         else:
             logger.warning(f"Frontend client not available - would execute draw: {parameters}")
-        return (None, None)
-
-    async def _execute_browser_command(self, tool_name: str, parameters: Dict[str, Any]):
-        browser_pod_identity = f"browser-bot-{self.session_id}" if self.session_id else None
-        if self._browser_pod_client and self._room and browser_pod_identity:
-            try:
-                await self._browser_pod_client.send_browser_command(self._room, browser_pod_identity, tool_name, parameters)
-                logger.info(f"Sent {tool_name} to browser pod {browser_pod_identity}")
-            except Exception as e:
-                logger.error(f"Failed to send {tool_name} to browser pod: {e}")
-        else:
-            logger.warning("Browser Pod client or room/session_id not available; cannot send browser action")
         return (None, None)
 
     async def _execute_frontend_action(self, tool_name: str, parameters: Dict[str, Any]):
