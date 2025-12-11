@@ -25,6 +25,7 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            agent_name="rox-agent",  # MUST match backend 'agents: [{ name: "rox-agent" }]'
             # Handle 4 students per pod to optimize cost
         )
     )

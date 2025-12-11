@@ -472,26 +472,23 @@ async def entrypoint(ctx: agents.JobContext):
         return
 
     # 2. TEACHER FILTER (The Critical Logic)
-    # If the room metadata explicitly says "needs_agent": false or creator_role is "teacher",
-    # we disconnect and exit early so teachers do not get an AI tutor.
+    # During debugging, we only inspect metadata and DO NOT disconnect even if
+    # this looks like a teacher session. This allows you to test with teacher accounts.
     try:
         room_meta = getattr(ctx.room, "metadata", None)
         if asyncio.iscoroutine(room_meta):
             room_meta = await room_meta
         if room_meta:
             meta = json.loads(room_meta)
-            if meta.get("needs_agent") is False or meta.get("creator_role") == "teacher":
+            # DEBUGGING: Log what the agent sees
+            logger.info(f"Agent Logic: metadata={meta}")
+
+            # If you want to force the agent to stay during debugging, comment out this check:
+            if meta.get("needs_agent") is False:  # or meta.get("creator_role") == "teacher":
                 logger.info(f"Teacher session detected ({ctx.room.name}). Agent not required. Disconnecting.")
-                try:
-                    await ctx.disconnect()
-                except Exception:
-                    pass
-                try:
-                    otel_context.detach(_root_token)
-                    _root_span.end()
-                except Exception:
-                    pass
-                return
+                # await ctx.disconnect()  # <-- COMMENTED OUT FOR TESTING
+                # return                  # <-- COMMENTED OUT FOR TESTING
+                pass
     except Exception as e:
         logger.warning(f"Failed to parse room metadata for teacher filter: {e}")
 
