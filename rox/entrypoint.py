@@ -28,6 +28,7 @@ async def _populate_agent_state_from_metadata(agent: RoxAgent, ctx: agents.JobCo
                 metadata = json.loads(env_meta_str)
             except Exception:
                 logger.warning("Failed to parse STUDENT_TOKEN_METADATA; ignoring env override")
+
         if not metadata:
             try:
                 room_meta = getattr(ctx.room, "metadata", None)
@@ -37,6 +38,7 @@ async def _populate_agent_state_from_metadata(agent: RoxAgent, ctx: agents.JobCo
                     metadata = json.loads(room_meta)
             except Exception:
                 pass
+
         if not metadata:
             try:
                 rp = getattr(ctx.room, "remote_participants", {}) or {}
@@ -52,6 +54,7 @@ async def _populate_agent_state_from_metadata(agent: RoxAgent, ctx: agents.JobCo
                         break
             except Exception:
                 pass
+
         if not metadata:
             try:
                 local_participant = ctx.room.local_participant
@@ -62,9 +65,15 @@ async def _populate_agent_state_from_metadata(agent: RoxAgent, ctx: agents.JobCo
                     metadata = json.loads(lp_meta)
             except Exception:
                 pass
-        agent.user_id = metadata.get("user_id")
-        agent.curriculum_id = metadata.get("curriculum_id")
-        agent.current_lo_id = metadata.get("current_lo_id")
+
+        agent.user_id = metadata.get("user_id") or agent.user_id
+
+        meta_curriculum = metadata.get("curriculum_id") or metadata.get("course_id")
+        if meta_curriculum:
+            agent.curriculum_id = meta_curriculum
+
+        if "current_lo_id" in metadata:
+            agent.current_lo_id = metadata.get("current_lo_id")
     except Exception as e:
         logger.warning(f"Could not populate metadata; proceeding with defaults: {e}")
     logger.info("Agent state populated from metadata.")
