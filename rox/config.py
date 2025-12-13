@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     LANGGRAPH_BACKOFF_BASE: float = 1.5
     VNC_LISTENER_HTTP_URL: Optional[str] = None
     BROWSER_POD_HTTP_URL: Optional[str] = None
-    LANGGRAPH_INCLUDE_VISUAL_CONTEXT: bool = True
+    LANGGRAPH_INCLUDE_VISUAL_CONTEXT: bool = False
     LANGGRAPH_ATTACH_BUFFERS: bool = True
 
     # Redis

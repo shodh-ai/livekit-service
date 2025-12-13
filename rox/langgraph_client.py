@@ -163,7 +163,9 @@ class LangGraphClient:
                     "captured_at": data.get("timestamp"),
                 }
         except Exception as e:
-            logger.warning(f"Failed to fetch visual context: {e}")
+            # Downgrade to debug to avoid noisy warnings in environments
+            # where a browser pod or VNC source is not available.
+            logger.debug(f"Failed to fetch visual context: {e}")
             return None
 
 

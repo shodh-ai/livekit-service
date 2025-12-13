@@ -340,34 +340,17 @@ class RoxAgent(agents.Agent):
                     # =================================================================
                     # TRAFFIC LIGHT PROTOCOL (PROACTIVITY)
                     # =================================================================
-                    # Check if the AI expects to hold the floor (Green Light) or yield (Red Light).
-                    # Logic: If suggested_responses is explicitly an empty list [], it means
-                    # "I am doing an action / transitioning, do not wait for user."
+                    # Previously, this block auto-enqueued a proactive turn (GREEN) when
+                    # suggested_responses was an empty list, and waited for the user (RED)
+                    # otherwise. For testing/manual control, this behavior is now disabled
+                    # and the agent will always wait for user input.
 
                     suggested_responses = metadata.get("suggested_responses")
 
-                    if isinstance(suggested_responses, list) and len(suggested_responses) == 0:
-                        logger.info("[Traffic Light] GREEN: No suggestions provided. Triggering proactive turn...")
-
-                        # Automatically enqueue the next turn with empty input
-                        # This mimics the user sending an empty "Ack" to trigger the Action Step.
-                        proactive_task = {
-                            "task_name": "handle_response",  # Maps to /handle_response in LangGraphClient
-                            "transcript": "",               # Empty string triggers 'Proactive Turn' logic in Kamikaze
-                            "caller_identity": self.caller_identity,
-                            "interaction_type": "proactive_continuation",
-                        }
-
-                        # Enqueue immediately
-                        await self._processing_queue.put(proactive_task)
-
-                    else:
-                        # If suggestions exist (or key is missing/None), we yield to the user.
-                        # The system now waits for VAD (Voice) or UI interaction.
-                        logger.info(
-                            "[Traffic Light] RED: Waiting for user input. Suggestions: "
-                            f"{len(suggested_responses) if isinstance(suggested_responses, list) else 'None'}"
-                        )
+                    logger.info(
+                        "[Traffic Light] DISABLED: Waiting for user input; ignoring suggested_responses="
+                        f"{suggested_responses!r}"
+                    )
 
                     # =================================================================
 
