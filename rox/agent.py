@@ -128,6 +128,10 @@ class RoxAgent(agents.Agent):
         self._start_task_enqueued: bool = False
         self._start_task_enqueued_at: Optional[float] = None
 
+        # Proactivity guardrails
+        self._consecutive_proactive_turns: int = 0
+        self._max_consecutive_proactive_turns: int = 5
+
         self._current_delivery_plan: Optional[List[Dict]] = None
         self._current_plan_index: int = 0
         self._interrupted_plan: Optional[List[Dict]] = None
@@ -340,17 +344,56 @@ class RoxAgent(agents.Agent):
                     # =================================================================
                     # TRAFFIC LIGHT PROTOCOL (PROACTIVITY)
                     # =================================================================
-                    # Previously, this block auto-enqueued a proactive turn (GREEN) when
-                    # suggested_responses was an empty list, and waited for the user (RED)
-                    # otherwise. For testing/manual control, this behavior is now disabled
-                    # and the agent will always wait for user input.
+                    # Kamikaze is the source of truth for whether we should continue proactively.
+                    # We rely on an explicit flag: delivery_plan.metadata.hold_floor == True.
+                    # Guardrails:
+                    # - Never enqueue if the plan contains a listen action (explicit yield)
+                    # - Cap consecutive proactive turns to prevent runaway loops
 
-                    suggested_responses = metadata.get("suggested_responses")
+                    hold_floor = False
+                    try:
+                        hold_floor = bool(metadata.get("hold_floor"))
+                    except Exception:
+                        hold_floor = False
 
-                    logger.info(
-                        "[Traffic Light] DISABLED: Waiting for user input; ignoring suggested_responses="
-                        f"{suggested_responses!r}"
-                    )
+                    has_listen_action = False
+                    try:
+                        for a in actions or []:
+                            if isinstance(a, dict) and str(a.get("tool_name") or "").lower() == "listen":
+                                has_listen_action = True
+                                break
+                    except Exception:
+                        has_listen_action = False
+
+                    if hold_floor and not has_listen_action:
+                        if self._consecutive_proactive_turns >= self._max_consecutive_proactive_turns:
+                            logger.warning(
+                                "[Traffic Light] RED (guardrail): max consecutive proactive turns reached (%s). Waiting for user input.",
+                                self._max_consecutive_proactive_turns,
+                            )
+                        else:
+                            self._consecutive_proactive_turns += 1
+                            logger.info(
+                                "[Traffic Light] GREEN: hold_floor=true; enqueuing proactive continuation (%s/%s)",
+                                self._consecutive_proactive_turns,
+                                self._max_consecutive_proactive_turns,
+                            )
+
+                            proactive_task = {
+                                "task_name": "handle_response",  # Maps to /handle_response in LangGraphClient
+                                "transcript": "",  # Empty string triggers 'Proactive Turn' logic in Kamikaze
+                                "caller_identity": self.caller_identity,
+                                "interaction_type": "proactive_continuation",
+                            }
+                            await self._processing_queue.put(proactive_task)
+                    else:
+                        # Any time we yield, reset the proactive counter
+                        self._consecutive_proactive_turns = 0
+                        logger.info(
+                            "[Traffic Light] RED: Waiting for user input. hold_floor=%s has_listen=%s",
+                            hold_floor,
+                            has_listen_action,
+                        )
 
                     # =================================================================
 
