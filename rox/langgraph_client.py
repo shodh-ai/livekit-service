@@ -251,7 +251,14 @@ class LangGraphClient:
             else:
                 endpoint = "/handle_response"
                 # Add student_input for regular response
-                request_body["student_input"] = task.get("transcript", "")
+                transcript = task.get("transcript", "")
+                interaction_type = task.get("interaction_type") if isinstance(task, dict) else None
+                # For proactive followups, prefer a true null/omitted student_input so the
+                # brain can distinguish them from an empty user message.
+                if interaction_type == "proactive" and not transcript:
+                    request_body["student_input"] = None
+                else:
+                    request_body["student_input"] = transcript
                 # Compose visual_context from task and optional VNC screenshot
                 vc = task.get("visual_context") or {}
                 vnc_vc = await self._fetch_visual_context(session)

@@ -3,6 +3,8 @@ import asyncio
 import json
 import logging
 import uuid
+import os
+import time
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 from contextlib import asynccontextmanager
 
@@ -340,17 +342,91 @@ class RoxAgent(agents.Agent):
                     # =================================================================
                     # TRAFFIC LIGHT PROTOCOL (PROACTIVITY)
                     # =================================================================
-                    # Previously, this block auto-enqueued a proactive turn (GREEN) when
-                    # suggested_responses was an empty list, and waited for the user (RED)
-                    # otherwise. For testing/manual control, this behavior is now disabled
-                    # and the agent will always wait for user input.
-
+                    # The brain can mark turns as:
+                    # - green: auto-continue (no need to wait)
+                    # - red: wait for user input (question / suggested responses present)
+                    # We keep this behavior behind a flag so local/manual testing can disable it.
+                    traffic_light_enabled = str(os.getenv("ROX_TRAFFIC_LIGHT_ENABLED", "false")).strip().lower() in {
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    }
+                    traffic_light = (metadata.get("traffic_light") or "").strip().lower()
                     suggested_responses = metadata.get("suggested_responses")
 
-                    logger.info(
-                        "[Traffic Light] DISABLED: Waiting for user input; ignoring suggested_responses="
-                        f"{suggested_responses!r}"
-                    )
+                    # Robustness controls
+                    max_green = int(os.getenv("ROX_MAX_CONSECUTIVE_GREENS", "3") or 3)
+                    min_interval_s = float(os.getenv("ROX_MIN_GREEN_INTERVAL_S", "0.8") or 0.8)
+                    try:
+                        if not hasattr(self, "_traffic_green_streak"):
+                            self._traffic_green_streak = 0
+                        if not hasattr(self, "_last_green_ts"):
+                            self._last_green_ts = 0.0
+                    except Exception:
+                        pass
+
+                    if not traffic_light_enabled:
+                        try:
+                            self._traffic_green_streak = 0
+                        except Exception:
+                            pass
+                        logger.info(
+                            "[Traffic Light] DISABLED: Waiting for user input; traffic_light=%r suggested_responses=%r",
+                            traffic_light,
+                            suggested_responses,
+                        )
+                    else:
+                        if traffic_light == "green":
+                            now = time.monotonic()
+                            # Rate limit + max streak to prevent runaway loops
+                            try:
+                                if (now - float(getattr(self, "_last_green_ts", 0.0))) < min_interval_s:
+                                    logger.info(
+                                        "[Traffic Light] GREEN suppressed by rate limit (min_interval_s=%s)",
+                                        min_interval_s,
+                                    )
+                                    self._processing_queue.task_done()
+                                    continue
+                                if int(getattr(self, "_traffic_green_streak", 0)) >= max_green:
+                                    logger.warning(
+                                        "[Traffic Light] GREEN suppressed by max streak (max_green=%s). Waiting for user input.",
+                                        max_green,
+                                    )
+                                    self._traffic_green_streak = 0
+                                    self._last_green_ts = now
+                                    self._processing_queue.task_done()
+                                    continue
+                            except Exception:
+                                pass
+
+                            followup_task = {
+                                "task_name": "handle_response",
+                                "caller_identity": self.caller_identity,
+                                "interaction_type": "proactive",
+                                # Empty transcript so Kamikaze sees this as a true proactive turn
+                                "transcript": "",
+                            }
+                            try:
+                                self._processing_queue.put_nowait(followup_task)
+                                try:
+                                    self._traffic_green_streak = int(getattr(self, "_traffic_green_streak", 0)) + 1
+                                    self._last_green_ts = now
+                                except Exception:
+                                    pass
+                                logger.info("[Traffic Light] GREEN: auto-enqueued proactive follow-up")
+                            except asyncio.QueueFull:
+                                logger.warning("[Traffic Light] Queue full; cannot auto-continue")
+                        else:
+                            try:
+                                self._traffic_green_streak = 0
+                            except Exception:
+                                pass
+                            logger.info(
+                                "[Traffic Light] RED/UNKNOWN: waiting for user input; traffic_light=%r suggested_responses=%r",
+                                traffic_light,
+                                suggested_responses,
+                            )
 
                     # =================================================================
 
