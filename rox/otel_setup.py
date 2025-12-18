@@ -13,7 +13,7 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter as OTLPSpanExporterHTTP
 from opentelemetry.instrumentation.aiohttp_client import AioHttpClientInstrumentor
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
-from config import get_settings
+from rox.config import get_settings
 
 # HTTPX instrumentation is optional; guard import to avoid hard failure if package is absent
 try:
