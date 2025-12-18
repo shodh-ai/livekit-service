@@ -104,6 +104,20 @@ class RoxAgent(agents.Agent):
                         break
             if transcript:
                 self._buffer.append(transcript)
+                try:
+                    outer = self._outer
+                    dest = getattr(outer, "caller_identity", None)
+                    room = getattr(outer, "_room", None)
+                    fc = getattr(outer, "_frontend_client", None)
+                    if dest and room and fc:
+                        envelope = {
+                            "type": "transcript",
+                            "text": transcript,
+                            "speaker": dest,
+                        }
+                        asyncio.create_task(fc._send_data(room, dest, envelope))
+                except Exception:
+                    pass
             try:
                 yield self._stream_empty()
             finally:
