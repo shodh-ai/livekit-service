@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # Deepgram
     DEEPGRAM_API_KEY: Optional[str] = None
 
+    # Sarvam
+    SARVAM_API_KEY: Optional[str] = None
+
     # OpenTelemetry / Grafana
     OTEL_SERVICE_NAME: str = "livekit-service"
     OTEL_SERVICE_NAMESPACE: str = "rox"
