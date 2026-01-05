@@ -10,7 +10,7 @@ python-dotenv==1.1.0
 # LiveKit core components (essential for agents)
 livekit==1.0.6
 livekit-protocol==1.0.2
-livekit-agents[deepgram,silero]~=1.0
+livekit-agents[deepgram,sarvam,silero]~=1.0
 
 # Essential utilities
 aiohttp

@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from opentelemetry import trace as otel_trace
 from opentelemetry import context as otel_context
 from livekit import rtc, agents
-from livekit.plugins import deepgram
+from livekit.plugins import deepgram, sarvam
 
 from .agent import RoxAgent
 from .rpc_services import AgentInteractionService
@@ -579,15 +579,12 @@ async def entrypoint(ctx: agents.JobContext):
     await _setup_room_lifecycle_events(agent, ctx)
     await _register_agent_rpc_handlers(agent, ctx)
 
-    # AgentSession with Deepgram TTS/STT and the LLM interceptor
+    # AgentSession with Sarvan STT and Deepgram TTS and the LLM interceptor
     session_kwargs = {
-        "stt": deepgram.STT(
-            model="nova-2",
-            language="en",
-            api_key=settings.DEEPGRAM_API_KEY,
-            interim_results=False,
-            punctuate=True,
-            smart_format=True,
+        "stt": sarvam.STT(
+            language="en-IN",
+            model="saarika:v2.5",
+            api_key=settings.SARVAM_API_KEY,
         ),
         "llm": agent.llm_interceptor,
         "tts": deepgram.TTS(
