@@ -8,9 +8,9 @@ uvicorn==0.23.2
 python-dotenv==1.1.0
 
 # LiveKit core components (essential for agents)
-livekit==1.0.6
-livekit-protocol==1.0.2
-livekit-agents[deepgram,sarvam,silero]~=1.0
+livekit>=1.0.23,<2
+livekit-protocol>=1.1,<2
+livekit-agents[deepgram,sarvam,silero]~=1.3
 
 # Essential utilities
 aiohttp
@@ -30,14 +30,15 @@ langchain
 # Protobuf for RPC communication
 protobuf
 google-cloud-storage
-opentelemetry-sdk==1.26.0
-opentelemetry-exporter-otlp==1.26.0
-opentelemetry-instrumentation-fastapi==0.47b0
-opentelemetry-instrumentation-aiohttp-client==0.47b0
-opentelemetry-instrumentation-logging==0.47b0
-opentelemetry-semantic-conventions==0.47b0
-opentelemetry-instrumentation-httpx==0.47b0
 redis
 pytest-asyncio
 pytest
 aioresponses
+
+# OpenTelemetry (SDK + common instrumentations)
+opentelemetry-sdk
+opentelemetry-exporter-otlp
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-aiohttp-client
+opentelemetry-instrumentation-logging
+opentelemetry-instrumentation-httpx
