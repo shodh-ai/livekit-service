@@ -201,6 +201,12 @@ class RoxAgent(agents.Agent):
             "browser_type_text": self._execute_browser_command,
             "web_click": self._execute_browser_command,
             "web_fill_input": self._execute_browser_command,
+            # Legacy tool aliases (route to browser pod for unified handling)
+            "click": self._execute_browser_command,
+            "tap": self._execute_browser_command,
+            "type": self._execute_browser_command,
+            "fill": self._execute_browser_command,
+            "browser_highlight": self._execute_browser_command,
             "browser_highlight_element": self._execute_browser_command,
             "jupyter_run_cell": self._execute_browser_command,
             "jupyter_add_cell": self._execute_browser_command,
